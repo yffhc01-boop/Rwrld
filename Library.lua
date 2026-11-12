@@ -2,7 +2,7 @@
 --[[
     rainworld — a Roblox UI library for executors.
 
-        local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/kvartirant327-sys/Lol/HEAD/Library.lua"))()
+        local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/yffhc01-boop/Rwrld/HEAD/Library.lua"))()
 
     Everything the library draws reads its colours from Library.Theme and its
     fonts and text sizes from Library.Text, so the whole interface can be
@@ -54,7 +54,7 @@ local Env = {
 
 local Library = {
     Name = "rainworld",
-    Version = "1.0.0",
+    Version = "1.1.0",
     Folder = "rainworld", -- workspace folder used for fonts, configs and scripts
     FontSource = "https://github.com/i77lhm/storage/raw/refs/heads/main/fonts/",
 
@@ -69,6 +69,22 @@ local Library = {
     Scale = 1,
     Loaded = false,
     Unloaded = false,
+}
+
+-- Everything the interface animates reads these, so motion can be restyled, sped
+-- up or switched off at runtime: Library:SetAnimation("Speed", 2).
+Library.Animations = {
+    Enabled = true,
+    Speed = 1, -- 2 plays everything twice as fast
+    Style = "Quad", -- an Enum.EasingStyle name
+    Direction = "Out", -- an Enum.EasingDirection name
+    Windows = "Fade", -- how windows open and close: "None", "Fade", "Slide" or "Scale"
+    Tabs = true, -- pages slide in when the tab changes
+    Elements = true, -- toggles, sliders, buttons and list rows
+    Popups = true, -- dropdowns, the colour picker and mode popups
+    Notifications = true,
+    Gradients = false, -- accent gradients travel sideways instead of standing still
+    GradientSpeed = 1,
 }
 
 local Utility = {}
@@ -117,6 +133,7 @@ Library.OpenChanged = Signal.new() -- (open)
 Library.ThemeChanged = Signal.new() -- (key, color)
 Library.ConfigLoaded = Signal.new() -- (name)
 Library.Unloading = Signal.new()
+Library.AnimationChanged = Signal.new() -- (key, value)
 
 --// Small helpers -------------------------------------------------------------
 
@@ -319,14 +336,13 @@ Library.Theme = {
     button_outline = rgb(44, 44, 44),
     track = rgb(40, 40, 40), -- empty slider track and inactive tab bars
     dock = rgb(17, 17, 17),
-    panel_inline = rgb(51, 51, 51),
 }
 
 -- Shown in this order by the theme window.
 Library.ThemeOrder = {
     "accent", "accent_text", "text", "text_dim", "text_outline", "outline", "inline", "background", "border",
     "page", "section", "section_inline", "element", "element_outline", "button_top", "button_bottom",
-    "button_outline", "track", "dock", "panel_inline",
+    "button_outline", "track", "dock",
 }
 
 Library.Presets = {
@@ -347,20 +363,8 @@ local Derived = {
     track_light = function(theme)
         return theme.track:Lerp(WHITE, 0.033)
     end,
-    selected = function(theme)
-        return BLACK:Lerp(theme.accent, 0.545)
-    end,
-    list_top = function(theme)
-        return BLACK:Lerp(theme.accent, 0.37)
-    end,
-    list_bottom = function(theme)
-        return BLACK:Lerp(theme.accent, 0.05)
-    end,
-    editor_top = function(theme)
-        return BLACK:Lerp(theme.accent, 0.25)
-    end,
     editor_line = function(theme)
-        return BLACK:Lerp(theme.accent, 0.41)
+        return theme.element:Lerp(theme.accent, 0.2)
     end,
     gutter = function(theme)
         return theme.element:Lerp(theme.accent, 0.03)
@@ -377,7 +381,8 @@ local Derived = {
 }
 
 local Bindings = {} -- instance -> { property = key }
-local GradientBindings = {} -- UIGradient -> { Keys = {...}, Split = number? }
+local GradientBindings = {} -- UIGradient -> { Keys = {...}, Split = number?, Rotation = number, Flow = boolean }
+local Sheens = {} -- UIGradient on a title -> true; only lit while gradients are animated
 
 function Library:GetColor(key)
     if typeof(key) == "Color3" then
@@ -395,22 +400,32 @@ function Library:GetColor(key)
 end
 
 -- Keeps `instance[property]` equal to a theme colour. Passing a Color3 instead
--- of a key sets the colour once and drops any previous binding.
-function Library:Bind(instance, property, key)
+-- of a key sets the colour once and drops any previous binding. `motion` names
+-- an animation kind ("Elements") to tween to the colour instead of jumping.
+function Library:Bind(instance, property, key, motion)
     local bound = Bindings[instance]
+    local color
     if typeof(key) == "Color3" then
         if bound then
             bound[property] = nil
         end
-        instance[property] = key
-        return
+        color = key
+    else
+        if not bound then
+            bound = {}
+            Bindings[instance] = bound
+        end
+        if bound[property] == key then
+            motion = nil -- already this colour
+        end
+        bound[property] = key
+        color = self:GetColor(key)
     end
-    if not bound then
-        bound = {}
-        Bindings[instance] = bound
+    if motion then
+        Utility.Motion(motion, instance, { [property] = color }, 0.12)
+    else
+        instance[property] = color
     end
-    bound[property] = key
-    instance[property] = self:GetColor(key)
 end
 
 local function GradientSequence(keys, split)
@@ -431,9 +446,32 @@ local function GradientSequence(keys, split)
     return ColorSequence.new(points)
 end
 
+-- Gradients made of accent tones can flow (Library.Animations.Gradients).
+local function Flows(keys)
+    for _, key in keys do
+        if type(key) == "string" and string.sub(key, 1, 6) == "accent" then
+            return true
+        end
+    end
+    return false
+end
+
+local function Flowing()
+    local settings = Library.Animations
+    return settings.Enabled and settings.Gradients == true
+end
+
 function Library:BindGradient(gradient, keys, split)
-    GradientBindings[gradient] = { Keys = keys, Split = split }
-    gradient.Color = GradientSequence(keys, split)
+    local binding = GradientBindings[gradient]
+    if not binding then
+        binding = { Rotation = gradient.Rotation }
+        GradientBindings[gradient] = binding
+    end
+    binding.Keys, binding.Split, binding.Flow = keys, split, Flows(keys)
+    if not (binding.Flow and Flowing()) then
+        gradient.Rotation = binding.Rotation
+        gradient.Color = GradientSequence(keys, split)
+    end
 end
 
 function Library:RefreshTheme()
@@ -442,8 +480,11 @@ function Library:RefreshTheme()
             instance[property] = self:GetColor(key)
         end
     end
+    local flowing = Flowing()
     for gradient, binding in GradientBindings do
-        gradient.Color = GradientSequence(binding.Keys, binding.Split)
+        if not (flowing and binding.Flow) then -- flowing gradients are redrawn every frame anyway
+            gradient.Color = GradientSequence(binding.Keys, binding.Split)
+        end
     end
 end
 
@@ -475,6 +516,54 @@ function Library:ApplyTheme(theme)
     end
 end
 
+-- Animated gradients: every accent gradient shares one sequence that travels
+-- sideways, and window titles get a sheen. Switching the option off puts the
+-- design's standing gradients back.
+local function FlowSequence(first, second, phase)
+    local points = table.create(9)
+    for index = 0, 8 do
+        local at = index / 8
+        local wave = 0.5 - 0.5 * math.cos((at - phase) * math.pi * 2)
+        points[index + 1] = ColorSequenceKeypoint.new(at, first:Lerp(second, wave))
+    end
+    return ColorSequence.new(points)
+end
+
+do
+    local active = false
+    Utility.Connect(RunService.RenderStepped, function()
+        if not Flowing() then
+            if active then
+                active = false
+                for gradient, binding in GradientBindings do
+                    if binding.Flow then
+                        gradient.Rotation = binding.Rotation
+                        gradient.Color = GradientSequence(binding.Keys, binding.Split)
+                    end
+                end
+                for gradient in Sheens do
+                    gradient.Enabled = false
+                end
+            end
+            return
+        end
+        active = true
+        local phase = (os.clock() * 0.4 * Library.Animations.GradientSpeed) % 1
+        local flow = FlowSequence(Library:GetColor("accent"), Library:GetColor("accent_text"), phase)
+        for gradient, binding in GradientBindings do
+            if binding.Flow then
+                gradient.Rotation = 0
+                gradient.Color = flow
+            end
+        end
+        local sheen = FlowSequence(WHITE, rgb(150, 150, 150), phase)
+        for gradient in Sheens do
+            gradient.Color = sheen
+            gradient.Enabled = true
+        end
+    end)
+end
+
 -- Destroys an instance and forgets the theme and text bindings below it.
 local TextBindings = {} -- instance -> role
 
@@ -485,6 +574,7 @@ function Utility.Destroy(instance)
     local function forget(object)
         Bindings[object] = nil
         GradientBindings[object] = nil
+        Sheens[object] = nil
         TextBindings[object] = nil
     end
     forget(instance)
@@ -525,14 +615,11 @@ Library.Text = {
     section = { Font = "ProggyClean", Size = 8 }, -- section headers
     text = { Font = "ProggyClean", Size = 9 }, -- element labels and values
     button = { Font = "ProggyClean", Size = 10 },
-    hud = { Font = "ProggyClean", Size = 10 }, -- keybind list, hitlogs, target hud, preview text
+    hud = { Font = "ProggyClean", Size = 10 }, -- keybind list, hitlogs, target hud, notifications
     watermark = { Font = "ProggyClean", Size = 9 }, -- watermark stats
     dock = { Font = "ProggyClean", Size = 12 },
     brand = { Font = "TahomaBold", Size = 11 }, -- name on the dock
     watermark_brand = { Font = "TahomaBold", Size = 11 },
-    preview_title = { Font = "TahomaBold", Size = 16 },
-    panel_title = { Font = "TahomaBold", Size = 22 }, -- configs / lua titles
-    panel_text = { Font = "Tahoma", Size = 15 }, -- configs / lua lists and buttons
 }
 
 Library.Fonts = {} -- name -> Font
@@ -770,22 +857,37 @@ function Utility.Tween(instance, properties, duration, style, direction)
 end
 
 -- Runs `step(alpha)` every frame for `duration` seconds, alpha going 0 -> 1.
+-- The returned object stops the animation with :Disconnect().
+local Animating = {}
+
 function Utility.Animate(duration, step, finished)
-    local started = os.clock()
-    local connection
-    connection = RunService.RenderStepped:Connect(function()
-        local alpha = duration <= 0 and 1 or math.clamp((os.clock() - started) / duration, 0, 1)
-        step(alpha)
-        if alpha >= 1 then
-            connection:Disconnect()
-            if finished then
-                finished()
+    local animation = { Started = os.clock(), Duration = duration, Step = step, Finished = finished, Connected = true }
+    function animation:Disconnect()
+        self.Connected = false
+    end
+    table.insert(Animating, animation)
+    return animation
+end
+
+Utility.Connect(RunService.RenderStepped, function()
+    local now = os.clock()
+    for index = #Animating, 1, -1 do
+        local animation = Animating[index]
+        local alpha = animation.Duration <= 0 and 1 or math.clamp((now - animation.Started) / animation.Duration, 0, 1)
+        if alpha >= 1 or not animation.Connected then
+            table.remove(Animating, index)
+        end
+        if animation.Connected then
+            if alpha >= 1 then
+                animation.Connected = false
+            end
+            animation.Step(alpha)
+            if alpha >= 1 and animation.Finished then
+                animation.Finished()
             end
         end
-    end)
-    table.insert(Library.Connections, connection)
-    return connection
-end
+    end
+end)
 
 Utility.Easing = {
     Linear = function(t)
@@ -813,6 +915,102 @@ Utility.Easing = {
         return n * t * t + 0.984375
     end,
 }
+
+--// Animations ----------------------------------------------------------------
+
+local WindowAnimations = { none = "None", fade = "Fade", slide = "Slide", scale = "Scale" }
+
+-- enum[name], or `fallback` when there is no such item.
+local function EnumNamed(enum, name, fallback)
+    local ok, item = pcall(function()
+        return enum[name]
+    end)
+    return ok and item or fallback
+end
+
+local function Easing()
+    local settings = Library.Animations
+    return EnumNamed(Enum.EasingStyle, settings.Style, Enum.EasingStyle.Quad),
+        EnumNamed(Enum.EasingDirection, settings.Direction, Enum.EasingDirection.Out)
+end
+
+-- False when animations as a whole, or this `kind` of them ("Elements",
+-- "Popups", ...), are switched off.
+function Utility.Animated(kind)
+    local settings = Library.Animations
+    if not kind or not settings.Enabled or Library.Unloaded then
+        return false
+    end
+    local value = settings[kind]
+    return value ~= false and value ~= "None"
+end
+
+-- Seconds an animation takes after the speed setting.
+function Utility.Duration(duration)
+    return duration / math.clamp(tonumber(Library.Animations.Speed) or 1, 0.1, 10)
+end
+
+-- The configured easing curve: alpha 0 -> 1 in, eased 0 -> 1 out.
+function Utility.Ease(alpha)
+    local style, direction = Easing()
+    local ok, eased = pcall(TweenService.GetValue, TweenService, alpha, style, direction)
+    return ok and eased or alpha
+end
+
+-- Tweens `properties` on `instance`, or applies them at once when `kind` is not animated.
+function Utility.Motion(kind, instance, properties, duration)
+    if not Utility.Animated(kind) then
+        for property, value in properties do
+            instance[property] = value
+        end
+        return nil
+    end
+    local style, direction = Easing()
+    return Utility.Tween(instance, properties, Utility.Duration(duration or 0.15), style, direction)
+end
+
+-- Library:SetAnimation("Speed", 1.5), ("Style", "Back"), ("Windows", "Slide"),
+-- ("Gradients", true) ... The keys are those of Library.Animations.
+function Library:SetAnimation(key, value)
+    local settings = self.Animations
+    for name in settings do
+        if string.lower(name) == string.lower(tostring(key)) then
+            key = name
+        end
+    end
+    if settings[key] == nil then
+        return
+    end
+    if typeof(value) == "EnumItem" then
+        value = value.Name
+    end
+    if key == "Speed" or key == "GradientSpeed" then
+        value = math.clamp(tonumber(value) or 1, 0.1, 10)
+    elseif key == "Style" or key == "Direction" then
+        local found
+        for _, item in (key == "Style" and Enum.EasingStyle or Enum.EasingDirection):GetEnumItems() do
+            if string.lower(item.Name) == string.lower(tostring(value)) then
+                found = item.Name
+            end
+        end
+        if not found then
+            return
+        end
+        value = found
+    elseif key == "Windows" then
+        value = WindowAnimations[string.lower(tostring(value))] or (value == false and "None" or "Fade")
+    else
+        value = value == true
+    end
+    settings[key] = value
+    self.AnimationChanged:Fire(key, value)
+end
+
+function Library:SetAnimations(settings)
+    for key, value in settings do
+        self:SetAnimation(key, value)
+    end
+end
 
 --// Screen, pointer and popups ------------------------------------------------
 
@@ -1047,6 +1245,48 @@ function Utility.Drag(handle, target, changed, enabled)
     end)
 end
 
+-- Makes `target` resizable by dragging `grip`. `resized(size)` runs on every
+-- move with the new size in offsets, never below `minimum`; the caller applies
+-- it. `changed(active)` reports the drag starting and ending.
+function Utility.Resize(grip, target, minimum, resized, changed)
+    local resizing, origin, start = false, nil, nil
+
+    Utility.Connect(grip.InputBegan, function(input)
+        if not IsPress(input) then
+            return
+        end
+        Library:ClosePopup()
+        resizing = true
+        start = Utility.Pointer(input)
+        origin = target.AbsoluteSize / Library.Scale
+        Utility.BringToFront(target)
+        if changed then
+            changed(true)
+        end
+    end)
+
+    Utility.Connect(UserInputService.InputChanged, function(input)
+        if not resizing or not IsMove(input) then
+            return
+        end
+        local delta = (Utility.Pointer(input) - start) / Library.Scale
+        local limit = Utility.Viewport() / Library.Scale
+        resized(Vector2.new(
+            math.floor(math.clamp(origin.X + delta.X, minimum.X, math.max(minimum.X, limit.X)) + 0.5),
+            math.floor(math.clamp(origin.Y + delta.Y, minimum.Y, math.max(minimum.Y, limit.Y)) + 0.5)
+        ))
+    end)
+
+    Utility.Connect(UserInputService.InputEnded, function(input)
+        if resizing and IsPress(input) then
+            resizing = false
+            if changed then
+                changed(false)
+            end
+        end
+    end)
+end
+
 --// Flags and configs ---------------------------------------------------------
 
 local FlagObjects = {} -- flag -> { Get = fn, Set = fn(value), Save = bool }
@@ -1095,13 +1335,13 @@ function Library:OnChanged(flag, callback)
     end
 end
 
--- Flags that describe the interface itself: window positions and visibility,
+-- Flags that describe the interface itself: window positions, sizes and visibility,
 -- theme colours and the theme window's settings.
 local function IsInterfaceFlag(flag)
     if type(flag) ~= "string" then
         return false
     end
-    for _, prefix in { "pos_", "show_", "theme_", "ui_" } do
+    for _, prefix in { "pos_", "size_", "show_", "theme_", "ui_" } do
         if string.sub(flag, 1, #prefix) == prefix then
             return true
         end
@@ -1253,6 +1493,117 @@ function Library:LoadAutoload()
     return false
 end
 
+--// Panel transitions ---------------------------------------------------------
+-- Windows fade (and optionally slide or scale) as they open and close. A fade
+-- walks every descendant instead of using a CanvasGroup, which would blur the
+-- pixel fonts.
+
+local Fadeable = {
+    Frame = { "BackgroundTransparency" },
+    ScrollingFrame = { "BackgroundTransparency", "ScrollBarImageTransparency" },
+    TextLabel = { "BackgroundTransparency", "TextTransparency" },
+    TextButton = { "BackgroundTransparency", "TextTransparency" },
+    TextBox = { "BackgroundTransparency", "TextTransparency" },
+    ImageLabel = { "BackgroundTransparency", "ImageTransparency" },
+    ImageButton = { "BackgroundTransparency", "ImageTransparency" },
+    ViewportFrame = { "BackgroundTransparency", "ImageTransparency" },
+    UIStroke = { "Transparency" },
+}
+
+-- Every transparency under `frame` that is not already fully transparent, as
+-- { instance, property, value }, so a fade can be undone exactly.
+function Utility.Fades(frame)
+    local items = {}
+    local function collect(instance)
+        local properties = Fadeable[instance.ClassName]
+        if not properties then
+            return
+        end
+        for _, property in properties do
+            local value = instance[property]
+            if value < 1 then
+                table.insert(items, { instance, property, value })
+            end
+        end
+    end
+    collect(frame)
+    for _, descendant in frame:GetDescendants() do
+        collect(descendant)
+    end
+    return items
+end
+
+-- shown = 1 puts the recorded values back, shown = 0 hides everything.
+function Utility.Fade(items, shown)
+    local hidden = 1 - math.clamp(shown, 0, 1)
+    for _, item in items do
+        item[1][item[2]] = item[3] + (1 - item[3]) * hidden
+    end
+end
+
+local function Transition(panel, visible)
+    if panel.Transition then
+        panel.Transition:Stop()
+    end
+
+    local frame = panel.Frame
+    local kind = Utility.Animated("Windows") and WindowAnimations[string.lower(tostring(Library.Animations.Windows))]
+    if not kind then
+        frame.Visible = visible
+        return
+    end
+
+    frame.Visible = true
+    local items = Utility.Fades(frame)
+    local size = frame.AbsoluteSize / Library.Scale
+    local scale = kind == "Scale" and (frame:FindFirstChildOfClass("UIScale") or New("UIScale", { Parent = frame }))
+    local moved = Vector2.zero
+
+    -- shown: 0 hidden -> 1 in place. The frame is nudged relative to where it
+    -- is, so a drag or a loaded position during the animation is kept.
+    local function apply(shown)
+        Utility.Fade(items, shown)
+        local offset = Vector2.zero
+        if kind == "Slide" then
+            offset = Vector2.new(0, math.floor((1 - shown) * 12 + 0.5))
+        elseif scale then
+            local factor = 0.94 + 0.06 * shown
+            scale.Scale = factor
+            offset = Vector2.new(
+                math.floor(size.X * (1 - factor) / 2 + 0.5),
+                math.floor(size.Y * (1 - factor) / 2 + 0.5)
+            )
+        end
+        if offset ~= moved then
+            local current = frame.Position
+            frame.Position = UDim2.new(
+                current.X.Scale,
+                current.X.Offset + offset.X - moved.X,
+                current.Y.Scale,
+                current.Y.Offset + offset.Y - moved.Y
+            )
+            moved = offset
+        end
+    end
+
+    local transition, animation = {}, nil
+    function transition:Stop()
+        panel.Transition = nil
+        animation:Disconnect()
+        apply(1)
+        frame.Visible = visible
+    end
+    panel.Transition = transition
+
+    apply(visible and 0 or 1)
+    animation = Utility.Animate(Utility.Duration(0.18), function(alpha)
+        local eased = Utility.Ease(alpha)
+        apply(visible and eased or 1 - eased)
+    end, function()
+        transition:Stop()
+    end)
+end
+
 --// Panels --------------------------------------------------------------------
 -- A panel is anything that sits directly on the screen: windows, the dock and
 -- the hud pieces. Hud panels stay visible while the menu is closed.
@@ -1274,7 +1625,15 @@ end
 Utility.ToVector2 = ToVector2
 
 function Panel:Refresh()
-    self.Frame.Visible = self.Enabled and (self.Hud or Library.Open)
+    local visible = self.Enabled and (self.Hud or Library.Open)
+    if self.Shown == nil then
+        -- first call: the panel is still being built, there is nothing to animate
+        self.Shown = visible
+        self.Frame.Visible = visible
+    elseif self.Shown ~= visible then
+        self.Shown = visible
+        Transition(self, visible)
+    end
 end
 
 function Panel:SetVisible(visible)
@@ -1403,8 +1762,11 @@ function Library:Window(properties)
         size = Vector2.new(387, 554),
         position = Vector2.new(261, 112),
         columns = 2,
+        minsize = Vector2.new(200, 150),
     })
     cfg.id = cfg.id or ("window_" .. string.lower(cfg.name))
+    local tabbed = cfg.tabs ~= false -- Tabs = false: one page, sections go straight on the window
+    local top = tabbed and 62 or 30 -- where the page starts
 
     local size = ToVector2(cfg.size, Vector2.new(387, 554))
     local position = ToVector2(cfg.position, Vector2.new(261, 112))
@@ -1421,9 +1783,12 @@ function Library:Window(properties)
         Name = cfg.name,
         Frame = outline,
         Size = size,
+        MinSize = ToVector2(cfg.minsize, Vector2.new(200, 150)),
         ColumnCount = cfg.columns,
+        Top = top,
         Tabs = {},
         Current = nil,
+        Resized = Signal.new(), -- (size)
     }, Window)
 
     window.Title = Utility.Text("title", {
@@ -1433,6 +1798,7 @@ function Library:Window(properties)
         Text = cfg.name,
         TextColor3 = "accent_text",
     })
+    Sheens[New("UIGradient", { Parent = window.Title, Enabled = false })] = true
 
     local handle = New("Frame", {
         Parent = background,
@@ -1442,22 +1808,57 @@ function Library:Window(properties)
     })
     Utility.Drag(handle, outline)
 
-    window.TabHolder = New("Frame", {
-        Parent = background,
-        Position = fromOffset(3, 30),
-        Size = UDim2.new(1, -6, 0, 24),
-        BackgroundTransparency = 1,
-    })
+    if tabbed then
+        window.TabHolder = New("Frame", {
+            Parent = background,
+            Position = fromOffset(3, 30),
+            Size = UDim2.new(1, -6, 0, 24),
+            BackgroundTransparency = 1,
+        })
+    end
 
     local _, page = Utility.Box({
         Parent = background,
-        Position = fromOffset(2, 62),
-        Size = UDim2.new(1, -4, 1, -64),
+        Position = fromOffset(2, top),
+        Size = UDim2.new(1, -4, 1, -top - 2),
+        ClipsDescendants = true, -- pages slide in from the side
     }, { { "border" } }, "page")
     window.Page = page
 
+    if cfg.resizable ~= false then
+        -- a corner mark in the gap between the page and the window border
+        local grip = New("TextButton", {
+            Parent = outline,
+            AnchorPoint = Vector2.new(1, 1),
+            Position = UDim2.fromScale(1, 1),
+            Size = fromOffset(12, 12),
+            ZIndex = 4,
+        })
+        local marks = {
+            New("Frame", { Parent = grip, Position = fromOffset(2, 8), Size = fromOffset(7, 1), BackgroundColor3 = "text_dim" }),
+            New("Frame", { Parent = grip, Position = fromOffset(8, 2), Size = fromOffset(1, 7), BackgroundColor3 = "text_dim" }),
+        }
+        Utility.Resize(grip, outline, window.MinSize, function(resized)
+            window:SetSize(resized)
+        end, function(active)
+            for _, mark in marks do
+                Library:Bind(mark, "BackgroundColor3", active and "accent" or "text_dim", "Elements")
+            end
+        end)
+        Library:RegisterFlag("size_" .. cfg.id, {
+            Get = function()
+                return { window.Size.X, window.Size.Y }
+            end,
+            Set = function(value)
+                window:SetSize(value)
+            end,
+        })
+    end
+
     SetupPanel(window, cfg)
-    if not self.Components.Menu then
+    if not tabbed then
+        window.Body = window:Tab({ Name = cfg.name, Columns = cfg.columns })
+    elseif not self.Components.Menu then
         self.Components.Menu = window -- the first window is the one scripts add tabs to
     end
     return window
@@ -1466,7 +1867,7 @@ end
 -- Pixel sizes derived from the window size, mirroring the design's insets.
 function Window:Metrics()
     local inner = self.Size - Vector2.new(6, 6) -- 2px outline + 1px inline per side
-    local page = Vector2.new(inner.X - 6, inner.Y - 66) -- inside the page border
+    local page = Vector2.new(inner.X - 6, inner.Y - self.Top - 4) -- inside the page border
     return {
         TabWidth = inner.X - 6,
         ColumnArea = Vector2.new(page.X - PAGE_PADDING * 2, page.Y - PAGE_PADDING * 2),
@@ -1476,9 +1877,8 @@ end
 function Window:Layout()
     local metrics = self:Metrics()
 
-    local count = #self.Tabs
-    if count > 0 then
-        local widths, x = Distribute(metrics.TabWidth, count, TAB_GAP), 0
+    if self.TabHolder and #self.Tabs > 0 then
+        local widths, x = Distribute(metrics.TabWidth, #self.Tabs, TAB_GAP), 0
         for index, tab in self.Tabs do
             tab.Button.Position = fromOffset(x, 0)
             tab.Button.Size = fromOffset(widths[index], 24)
@@ -1498,12 +1898,15 @@ function Window:Layout()
     end
 end
 
+-- Windows are also resized by dragging the mark in their bottom right corner.
 function Window:SetSize(size)
     size = ToVector2(size)
     if size then
+        size = Vector2.new(math.max(size.X, self.MinSize.X), math.max(size.Y, self.MinSize.Y))
         self.Size = size
         self.Frame.Size = fromOffset(size.X, size.Y)
         self:Layout()
+        self.Resized:Fire(size)
     end
 end
 
@@ -1525,11 +1928,23 @@ function Window:SelectTab(tab)
         return
     end
     Library:ClosePopup()
+    local previous = self.Current
     self.Current = tab
     for _, other in self.Tabs do
         local active = other == tab
         other.Page.Visible = active
-        Library:BindGradient(other.BarGradient, active and { "accent_light", "accent" } or { "track_light", "track" }, 0.5)
+        if other.BarGradient then
+            local keys = active and { "accent_light", "accent" } or { "track_light", "track" }
+            Library:BindGradient(other.BarGradient, keys, 0.5)
+        end
+    end
+    if previous and Utility.Animated("Tabs") then
+        -- the page comes in from the side its tab is on
+        local side = table.find(self.Tabs, tab) > table.find(self.Tabs, previous) and 1 or -1
+        tab.Page.Position = fromOffset(side * 10, 0)
+        Utility.Motion("Tabs", tab.Page, { Position = fromOffset(0, 0) }, 0.16)
+    else
+        tab.Page.Position = fromOffset(0, 0)
     end
 end
 
@@ -1543,19 +1958,25 @@ function Window:Tab(properties)
         Columns = {},
     }, Tab)
 
-    tab.Button = New("TextButton", { Parent = window.TabHolder })
-    tab.Label = Utility.Text("tab", {
-        Parent = tab.Button,
-        Size = UDim2.new(1, 0, 0, 19),
-        Text = cfg.name,
-    })
-    local bar = New("Frame", {
-        Parent = tab.Button,
-        Position = fromOffset(0, 20),
-        Size = UDim2.new(1, 0, 0, 4),
-        BackgroundColor3 = WHITE,
-    })
-    tab.BarGradient = Utility.Gradient(bar, { "track_light", "track" }, 0.5)
+    -- windows without a tab bar (Tabs = false) keep their one page off it
+    if window.TabHolder then
+        tab.Button = New("TextButton", { Parent = window.TabHolder })
+        tab.Label = Utility.Text("tab", {
+            Parent = tab.Button,
+            Size = UDim2.new(1, 0, 0, 19),
+            Text = cfg.name,
+        })
+        local bar = New("Frame", {
+            Parent = tab.Button,
+            Position = fromOffset(0, 20),
+            Size = UDim2.new(1, 0, 0, 4),
+            BackgroundColor3 = WHITE,
+        })
+        tab.BarGradient = Utility.Gradient(bar, { "track_light", "track" }, 0.5)
+        Utility.Connect(tab.Button.MouseButton1Click, function()
+            window:SelectTab(tab)
+        end)
+    end
 
     tab.Page = New("Frame", {
         Parent = window.Page,
@@ -1572,16 +1993,18 @@ function Window:Tab(properties)
         }
     end
 
-    Utility.Connect(tab.Button.MouseButton1Click, function()
-        window:SelectTab(tab)
-    end)
-
     table.insert(window.Tabs, tab)
     window:Layout()
     if not window.Current then
         window:SelectTab(tab)
     end
     return tab
+end
+
+-- Adds a section to the window's own page (Tabs = false), or to the tab that is open.
+function Window:Section(properties)
+    local tab = self.Body or self.Current or self:Tab({ Name = self.Name })
+    return tab:Section(properties)
 end
 
 function Tab:Select()
@@ -1620,6 +2043,8 @@ function Tab:LayoutColumn(column)
         end
         section.Frame.Position = fromOffset(0, y)
         section.Frame.Size = UDim2.new(1, 0, 0, height)
+        section.PixelHeight = height
+        section:Reflow()
         y += height + COLUMN_GAP
     end
 end
@@ -1696,12 +2121,37 @@ function Section:Row(height)
         self.Height = self.ContentHeight + 16 -- list padding + borders
         self.Tab:LayoutColumn(self.Column)
     end
+    self:Reflow()
     return New("Frame", {
         Parent = self.Content,
         Size = UDim2.new(1, 0, 0, height),
         BackgroundTransparency = 1,
         LayoutOrder = self.Order,
     })
+end
+
+-- Lets `row` take whatever height the other rows leave free, never less than
+-- `minimum`. One row per section; `resized(height)` runs when it changes.
+function Section:Stretch(row, minimum, resized)
+    self.Stretched = { Row = row, Minimum = minimum, Height = row.Size.Y.Offset, Resized = resized }
+    self:Reflow()
+end
+
+function Section:Reflow()
+    local stretched = self.Stretched
+    if not stretched or self.Auto or not self.PixelHeight then
+        return
+    end
+    -- 16: list padding + borders, as in Section:Row
+    local height = math.max(stretched.Minimum, self.PixelHeight - 16 - (self.ContentHeight - stretched.Height))
+    if height ~= stretched.Height then
+        self.ContentHeight += height - stretched.Height
+        stretched.Height = height
+        stretched.Row.Size = UDim2.new(1, 0, 0, height)
+        if stretched.Resized then
+            stretched.Resized(height)
+        end
+    end
 end
 
 --// Elements ------------------------------------------------------------------
@@ -1798,6 +2248,7 @@ local function ChoicePopup(owner, choices, current, picked)
         Parent = Library.Overlay,
         ZIndex = 60,
         Active = true,
+        ClipsDescendants = true,
     }, { { "border" } }, "element")
     New("UIListLayout", { Parent = fill })
 
@@ -1819,8 +2270,9 @@ local function ChoicePopup(owner, choices, current, picked)
     end
 
     local origin = Utility.ToOffset(owner.AbsolutePosition)
-    popup.Size = fromOffset(width, #choices * 13 + 2)
+    popup.Size = fromOffset(width, 0) -- unfolds
     popup.Position = fromOffset(origin.X, origin.Y + owner.AbsoluteSize.Y / Library.Scale + 2)
+    Utility.Motion("Popups", popup, { Size = fromOffset(width, #choices * 13 + 2) }, 0.12)
 
     Library:OpenPopup({
         Frame = popup,
@@ -2036,7 +2488,7 @@ end)
 
 --// Colour picker ---------------------------------------------------------------
 
-local ColorPopup = { Hue = 0, Saturation = 1, Value = 1, Current = nil }
+local ColorPopup = { Hue = 0, Saturation = 1, Value = 1, Current = nil, Target = "Base" }
 
 local Rainbow = ColorSequence.new({
     ColorSequenceKeypoint.new(0, rgb(255, 0, 0)),
@@ -2047,6 +2499,32 @@ local Rainbow = ColorSequence.new({
     ColorSequenceKeypoint.new(5 / 6, rgb(255, 0, 255)),
     ColorSequenceKeypoint.new(1, rgb(255, 0, 0)),
 })
+
+-- A picker can animate its colour: "Rainbow" turns the hue, "Pulse" breathes
+-- towards black and "Fade" travels to a second colour and back.
+local ColorAnimations = { static = "Static", none = "Static", rainbow = "Rainbow", pulse = "Pulse", fade = "Fade" }
+local ColorAnimationOrder = { "Static", "Rainbow", "Pulse", "Fade" }
+local AnimatedPickers = {} -- picker -> true while it is animated
+
+Library.ColorRate = 1 / 30 -- seconds between the colours an animated picker publishes
+
+do
+    local elapsed = 0
+    Utility.Connect(RunService.RenderStepped, function(delta)
+        if next(AnimatedPickers) == nil then
+            return
+        end
+        elapsed += delta
+        if elapsed < Library.ColorRate then
+            return
+        end
+        elapsed = 0
+        local clock = os.clock()
+        for picker in table.clone(AnimatedPickers) do
+            picker:Step(clock)
+        end
+    end)
+end
 
 function ColorPopup:Build()
     if self.Frame then
@@ -2122,6 +2600,77 @@ function ColorPopup:Build()
         ZIndex = 2,
     })
 
+    -- animation rows: the mode (click to step through them), its speed, and the
+    -- second colour that "Fade" travels to
+    local function line(class, text, height)
+        local holder = New(class, {
+            Parent = inner,
+            Size = fromOffset(122, height),
+            BackgroundTransparency = 1,
+            Visible = false,
+        })
+        local caption = Utility.Text("text", {
+            Parent = holder,
+            Size = UDim2.new(1, 0, 0, 10),
+            Text = text,
+            TextColor3 = "text_dim",
+            TextXAlignment = Left,
+        })
+        local value = Utility.Text("text", { Parent = holder, Size = UDim2.new(1, 0, 0, 10), TextXAlignment = Right })
+        return holder, value, caption
+    end
+
+    self.ModeRow, self.ModeValue = line("TextButton", "animation", 10)
+    self.SpeedRow, self.SpeedValue = line("Frame", "speed", 16)
+    local speedBar = New("Frame", {
+        Parent = self.SpeedRow,
+        Position = fromOffset(0, 11),
+        Size = UDim2.new(1, 0, 0, 5),
+        BackgroundColor3 = WHITE,
+        Active = true,
+    })
+    Utility.Gradient(speedBar, { "track_light", "track" }, 0.6)
+    self.SpeedBar = speedBar
+    self.SpeedFill = New("Frame", { Parent = speedBar, Size = UDim2.fromScale(0, 1), BackgroundColor3 = WHITE })
+    Utility.Gradient(self.SpeedFill, { "accent_light", "accent" }, 0.6)
+
+    local _, secondCaption
+    self.SecondRow, _, secondCaption = line("TextButton", "second colour", 10)
+    self.SecondCaption = secondCaption
+    local _, second = Utility.Box({
+        Parent = self.SecondRow,
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.fromScale(1, 0),
+        Size = fromOffset(15, 10),
+    }, { { "element_outline" } }, "white")
+    Library:Bind(second, "BackgroundColor3", WHITE) -- recoloured by hand, like the square
+    self.SecondFill = second
+
+    local function cycle(direction)
+        local picker = self.Current
+        if not picker then
+            return
+        end
+        local index = table.find(ColorAnimationOrder, picker.Animation) or 1
+        picker:SetAnimation(ColorAnimationOrder[(index - 1 + direction) % #ColorAnimationOrder + 1])
+        if picker.Animation ~= "Fade" then
+            self.Target = "Base"
+        end
+        self:Arrange()
+        self:Sync()
+    end
+    Utility.Connect(self.ModeRow.MouseButton1Click, function()
+        cycle(1)
+    end)
+    Utility.Connect(self.ModeRow.MouseButton2Click, function()
+        cycle(-1)
+    end)
+    -- the square and the hue strip edit whichever colour is lit
+    Utility.Connect(self.SecondRow.MouseButton1Click, function()
+        self.Target = self.Target == "Second" and "Base" or "Second"
+        self:Sync()
+    end)
+
     local dragging
     local function update(input)
         local picker = self.Current
@@ -2129,24 +2678,35 @@ function ColorPopup:Build()
             return
         end
         local point = Utility.Pointer(input)
-        local bar = dragging == "hue" and self.HueBar or dragging == "alpha" and self.AlphaBar or self.Square
+        local bar = dragging == "hue" and self.HueBar
+            or dragging == "alpha" and self.AlphaBar
+            or dragging == "speed" and self.SpeedBar
+            or self.Square
         local x = math.clamp((point.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
         local y = math.clamp((point.Y - bar.AbsolutePosition.Y) / bar.AbsoluteSize.Y, 0, 1)
-        local transparency = picker.Transparency
+        if dragging == "speed" then
+            picker:SetAnimation(picker.Animation, Utility.Round(0.1 + x * 4.9, 0.1))
+            self:Render()
+            return
+        end
         if dragging == "hue" then
             self.Hue = x
-        elseif dragging == "alpha" then
-            transparency = x
-        else
+        elseif dragging ~= "alpha" then
             self.Saturation, self.Value = x, 1 - y
         end
         self.Applying = true
-        picker:Set(Color3.fromHSV(self.Hue, self.Saturation, self.Value), transparency)
+        if dragging == "alpha" then
+            picker:Set(picker.Base, x)
+        elseif self.Target == "Second" then
+            picker:SetSecond(Color3.fromHSV(self.Hue, self.Saturation, self.Value))
+        else
+            picker:Set(Color3.fromHSV(self.Hue, self.Saturation, self.Value), picker.Transparency)
+        end
         self.Applying = false
         self:Render()
     end
 
-    for name, target in { hue = hueOuter, square = squareOuter, alpha = alphaOuter } do
+    for name, target in { hue = hueOuter, square = squareOuter, alpha = alphaOuter, speed = speedBar } do
         Utility.Connect(target.InputBegan, function(input)
             if IsPress(input) then
                 dragging = name
@@ -2166,6 +2726,27 @@ function ColorPopup:Build()
     end)
 end
 
+-- Lays the optional rows out under the colour square and sizes the popup to fit.
+function ColorPopup:Arrange()
+    local picker = self.Current
+    if not picker then
+        return
+    end
+    local y = 148
+    local function place(row, shown, height)
+        row.Visible = shown
+        if shown then
+            row.Position = fromOffset(3, y)
+            y += height + 3
+        end
+    end
+    place(self.AlphaOuter, picker.HasTransparency, 17)
+    place(self.ModeRow, picker.Animatable, 10)
+    place(self.SpeedRow, picker.Animatable and picker.Animation ~= "Static", 16)
+    place(self.SecondRow, picker.Animatable and picker.Animation == "Fade", 10)
+    self.Frame.Size = fromOffset(130, y + 2)
+end
+
 function ColorPopup:Render()
     local picker = self.Current
     if not picker then
@@ -2176,15 +2757,23 @@ function ColorPopup:Render()
     self.Cursor.Position = UDim2.fromScale(self.Saturation, 1 - self.Value)
     self.AlphaFill.BackgroundColor3 = picker.Value
     self.AlphaLine.Position = UDim2.new(picker.Transparency, 0, 0, -1)
+
+    self.ModeValue.Text = string.lower(picker.Animation)
+    Library:Bind(self.ModeValue, "TextColor3", picker.Animation == "Static" and "text" or "accent_text")
+    self.SpeedValue.Text = string.format("%.1fx", picker.Speed)
+    self.SpeedFill.Size = UDim2.fromScale(math.clamp((picker.Speed - 0.1) / 4.9, 0, 1), 1)
+    self.SecondFill.BackgroundColor3 = picker.Second
+    Library:Bind(self.SecondCaption, "TextColor3", self.Target == "Second" and "accent_text" or "text_dim")
 end
 
--- Re-reads the picker's colour (used when it changes from code while open).
+-- Re-reads the colour being edited (used when it changes from code while open).
 function ColorPopup:Sync()
     local picker = self.Current
     if not picker or self.Applying then
         return
     end
-    local hue, saturation, value = picker.Value:ToHSV()
+    local color = self.Target == "Second" and picker.Second or picker.Base
+    local hue, saturation, value = color:ToHSV()
     -- hue is undefined for greys; keep the strip where the user left it
     if saturation > 0 and value > 0 then
         self.Hue = hue
@@ -2201,19 +2790,20 @@ function ColorPopup:Open(picker, anchor)
     end
     Library:ClosePopup()
     self.Current = picker
-    self.AlphaOuter.Visible = picker.HasTransparency
-    self.Frame.Size = fromOffset(130, picker.HasTransparency and 170 or 150)
+    self.Target = "Base"
+    self:Arrange()
 
     -- docks to the left of the owning window like in the design, else to the right
     local reference = picker.Window and picker.Window.Frame or anchor
     local origin = Utility.ToOffset(reference.AbsolutePosition)
     local width = reference.AbsoluteSize.X / Library.Scale
-    local x = origin.X - 138
+    local x, from = origin.X - 138, 8
     if x < 0 then
-        x = origin.X + width + 8
+        x, from = origin.X + width + 8, -8
     end
-    self.Frame.Position = fromOffset(x, origin.Y)
+    self.Frame.Position = fromOffset(x + from, origin.Y) -- slides out from the window
     self.Frame.Visible = true
+    Utility.Motion("Popups", self.Frame, { Position = fromOffset(x, origin.Y) }, 0.12)
     self:Sync()
 
     Library:OpenPopup({
@@ -2231,14 +2821,19 @@ local function CreateColorpicker(holder, properties, name, order, window)
     local picker = {
         Class = "Colorpicker",
         Name = cfg.name,
-        Value = cfg.default,
+        Value = cfg.default, -- the colour right now; it moves while the picker is animated
+        Base = cfg.default, -- the colour that was picked
+        Second = typeof(cfg.second) == "Color3" and cfg.second or WHITE, -- where "Fade" travels to
+        Animation = "Static",
+        Speed = 1,
+        Animatable = cfg.animations ~= false, -- Animations = false hides the rows in the popup
         Transparency = cfg.transparency or 0,
         HasTransparency = cfg.transparency ~= nil,
         Window = window,
         Changed = Signal.new(),
     }
     -- Library.Flags[flag] is this table, updated in place.
-    local state = { Color = picker.Value, Transparency = picker.Transparency }
+    local state = { Color = picker.Value, Transparency = picker.Transparency, Animation = "Static", Speed = 1 }
 
     local swatch, fill = Utility.Box({
         Parent = holder,
@@ -2247,24 +2842,75 @@ local function CreateColorpicker(holder, properties, name, order, window)
     }, { { "element_outline" } }, "white")
     local button = New("TextButton", { Parent = swatch, Size = UDim2.fromScale(1, 1), ZIndex = 2 })
 
+    -- Publishes the colour the picker shows right now.
+    local function apply(color, silent)
+        picker.Value = color
+        Library:Bind(fill, "BackgroundColor3", color) -- a Color3 replaces the theme binding
+        state.Color, state.Transparency = color, picker.Transparency
+        state.Animation, state.Speed = picker.Animation, picker.Speed
+        Library:SetFlag(cfg.flag, state)
+        picker.Changed:Fire(color, picker.Transparency)
+        if not silent then
+            Utility.Call(cfg.callback, color, picker.Transparency)
+        end
+    end
+
+    -- Works out the colour for this moment and publishes it.
+    function picker:Step(clock, silent)
+        local base, phase = self.Base, clock * self.Speed
+        if self.Animation == "Rainbow" then
+            local _, saturation, value = base:ToHSV()
+            -- greys have no hue to turn, so they borrow full saturation and value
+            apply(
+                Color3.fromHSV((phase * 0.2) % 1, saturation > 0.05 and saturation or 1, value > 0.05 and value or 1),
+                silent
+            )
+        elseif self.Animation == "Pulse" then
+            apply(base:Lerp(BLACK, 0.35 - 0.35 * math.cos(phase * 2.5)), silent)
+        elseif self.Animation == "Fade" then
+            apply(base:Lerp(self.Second, 0.5 - 0.5 * math.cos(phase * 2.5)), silent)
+        else
+            apply(base, silent)
+        end
+        if ColorPopup.Current == self then
+            ColorPopup:Render()
+        end
+    end
+
     function picker:Set(color, transparency, silent)
         if typeof(color) ~= "Color3" then
             return
         end
-        self.Value = color
+        self.Base = color
         if transparency ~= nil and self.HasTransparency then
             self.Transparency = math.clamp(transparency, 0, 1)
         end
-        Library:Bind(fill, "BackgroundColor3", color) -- a Color3 replaces the theme binding
-        state.Color, state.Transparency = color, self.Transparency
-        Library:SetFlag(cfg.flag, state)
-        self.Changed:Fire(color, self.Transparency)
-        if not silent then
-            Utility.Call(cfg.callback, color, self.Transparency)
-        end
+        self:Step(os.clock(), silent)
         if ColorPopup.Current == self then
             ColorPopup:Sync()
         end
+    end
+
+    -- The colour "Fade" travels to.
+    function picker:SetSecond(color)
+        if typeof(color) ~= "Color3" then
+            return
+        end
+        self.Second = color
+        self:Step(os.clock())
+        if ColorPopup.Current == self then
+            ColorPopup:Sync()
+        end
+    end
+
+    -- picker:SetAnimation("Rainbow", 2). "Static" settles on the picked colour.
+    function picker:SetAnimation(animation, speed)
+        self.Animation = ColorAnimations[string.lower(tostring(animation))] or "Static"
+        if speed ~= nil then
+            self.Speed = math.clamp(tonumber(speed) or 1, 0.1, 5)
+        end
+        AnimatedPickers[self] = self.Animation ~= "Static" or nil
+        self:Step(os.clock())
     end
 
     function picker:Get()
@@ -2291,17 +2937,27 @@ local function CreateColorpicker(holder, properties, name, order, window)
     Library:RegisterFlag(cfg.flag, {
         Save = cfg.save,
         Get = function()
-            return { color = Utility.ToHex(picker.Value), transparency = picker.Transparency }
+            local saved = { color = Utility.ToHex(picker.Base), transparency = picker.Transparency }
+            if picker.Animation ~= "Static" then
+                saved.animation, saved.speed = picker.Animation, picker.Speed
+                saved.second = Utility.ToHex(picker.Second)
+            end
+            return saved
         end,
         Set = function(value)
             if type(value) == "table" then
-                picker:Set(Utility.FromHex(value.color) or picker.Value, value.transparency)
+                picker.Second = Utility.FromHex(value.second) or picker.Second
+                picker:Set(Utility.FromHex(value.color) or picker.Base, value.transparency)
+                picker:SetAnimation(value.animation or "Static", value.speed)
             else
-                picker:Set(Utility.FromHex(value) or picker.Value)
+                picker:Set(Utility.FromHex(value) or picker.Base)
             end
         end,
     })
     picker:Set(cfg.default, picker.Transparency)
+    if cfg.animation ~= nil then
+        picker:SetAnimation(cfg.animation, cfg.speed)
+    end
     return picker
 end
 
@@ -2368,10 +3024,12 @@ function Section:Toggle(properties)
         TextXAlignment = Left,
     })
 
+    local ready = false -- the value a toggle is created with is not animated
+
     function toggle:Set(value, silent)
         value = value == true
         self.Value = value
-        Library:Bind(check, "BackgroundColor3", value and "accent" or "element")
+        Library:Bind(check, "BackgroundColor3", value and "accent" or "element", ready and "Elements")
         Library:SetFlag(cfg.flag, value)
         self.Changed:Fire(value)
         if not silent then
@@ -2399,6 +3057,7 @@ function Section:Toggle(properties)
         end,
     })
     toggle:Set(cfg.default)
+    ready = true
     return toggle
 end
 
@@ -2510,6 +3169,12 @@ function Section:Slider(properties)
         return maximum == minimum and 0 or (number - minimum) / (maximum - minimum)
     end
 
+    local ready = false
+    -- the bar glides to its new place once the slider exists
+    local function glide(instance, properties)
+        Utility.Motion(ready and "Elements", instance, properties, 0.08)
+    end
+
     function slider:Set(newValue, silent)
         if ranged then
             local low, high = minimum, maximum
@@ -2521,14 +3186,16 @@ function Section:Slider(properties)
                 low, high = high, low
             end
             self.Value = { Min = low, Max = high }
-            fill.Position = UDim2.fromScale(alpha(low), 0)
-            fill.Size = UDim2.fromScale(alpha(high) - alpha(low), 1)
-            value.Position = UDim2.new((alpha(low) + alpha(high)) / 2, 0, 0, 5)
+            glide(fill, {
+                Position = UDim2.fromScale(alpha(low), 0),
+                Size = UDim2.fromScale(alpha(high) - alpha(low), 1),
+            })
+            glide(value, { Position = UDim2.new((alpha(low) + alpha(high)) / 2, 0, 0, 5) })
             value.Text = format(low) .. " - " .. format(high)
         else
             self.Value = snap(newValue)
-            fill.Size = UDim2.fromScale(alpha(self.Value), 1)
-            value.Position = UDim2.new(alpha(self.Value), 0, 0, 5)
+            glide(fill, { Size = UDim2.fromScale(alpha(self.Value), 1) })
+            glide(value, { Position = UDim2.new(alpha(self.Value), 0, 0, 5) })
             value.Text = format(self.Value)
         end
         Library:SetFlag(cfg.flag, self.Value)
@@ -2614,6 +3281,7 @@ function Section:Slider(properties)
         end,
     })
     slider:Set(cfg.default or (ranged and { minimum, maximum }) or minimum)
+    ready = true
     return slider
 end
 
@@ -2670,6 +3338,7 @@ function Section:Dropdown(properties)
         Visible = false,
         ZIndex = 40,
         Active = true,
+        ClipsDescendants = true, -- the list unfolds when it opens
     }, { { "border" } }, "element")
     local scroll = New("ScrollingFrame", {
         Parent = popupFill,
@@ -2694,7 +3363,7 @@ function Section:Dropdown(properties)
             text.Text = dropdown.Value ~= nil and tostring(dropdown.Value) or (cfg.placeholder or "none")
         end
         for option, entry in rows do
-            Library:Bind(entry, "TextColor3", selected(option) and "accent_text" or "text")
+            Library:Bind(entry, "TextColor3", selected(option) and "accent_text" or "text", "Elements")
         end
     end
 
@@ -2782,13 +3451,16 @@ function Section:Dropdown(properties)
         local origin = Utility.ToOffset(box.AbsolutePosition)
         local size = box.AbsoluteSize / Library.Scale
         local height = math.clamp(#self.Options, 1, cfg.maxvisible) * 13 + 2
-        local y = origin.Y + size.Y - 1
+        local y, from = origin.Y + size.Y - 1, nil
         if y + height > Utility.Viewport().Y / Library.Scale then
             y = origin.Y - height + 1 -- no room below: open upwards
+            from = origin.Y + 1
         end
-        popup.Position = fromOffset(origin.X, y)
-        popup.Size = fromOffset(size.X, height)
+        popup.Position = fromOffset(origin.X, from or y)
+        popup.Size = fromOffset(size.X, 0)
         popup.Visible = true
+        local unfolded = { Position = fromOffset(origin.X, y), Size = fromOffset(size.X, height) }
+        Utility.Motion("Popups", popup, unfolded, 0.12)
         vertical.Visible = false
         self.Opened = true
         Library:OpenPopup({
@@ -2887,7 +3559,7 @@ end
 
 --// Buttons ---------------------------------------------------------------------
 
--- The gradient button used by sections and by the configs / lua windows.
+-- The gradient button used by sections and notifications.
 local function CreateButton(parent, properties, position, size, role)
     local cfg = Options(properties, { name = "button" })
     local button = { Class = "Button", Name = cfg.name }
@@ -2896,7 +3568,7 @@ local function CreateButton(parent, properties, position, size, role)
         Parent = parent,
         Position = position,
         Size = size,
-    }, role == "panel_text" and { { "border" }, { "button_outline" } } or { { "button_outline" } }, "white")
+    }, { { "button_outline" } }, "white")
     Utility.Gradient(fill, { "button_top", "button_bottom" })
     local label = Utility.Text(role or "button", { Parent = fill, Size = UDim2.fromScale(1, 1), Text = cfg.name })
     local click = New("TextButton", { Parent = outer, Size = UDim2.fromScale(1, 1), ZIndex = 2 })
@@ -2915,10 +3587,10 @@ local function CreateButton(parent, properties, position, size, role)
     end
 
     local function release()
-        Library:Bind(label, "TextColor3", "text")
+        Library:Bind(label, "TextColor3", "text", "Elements")
     end
     Utility.Connect(click.MouseButton1Down, function()
-        Library:Bind(label, "TextColor3", "accent_text")
+        Library:Bind(label, "TextColor3", "accent_text", "Elements")
     end)
     Utility.Connect(click.MouseButton1Up, release)
     Utility.Connect(click.MouseLeave, release)
@@ -2991,8 +3663,12 @@ function Section:List(properties)
     local _, fill = Utility.Box({
         Parent = row,
         Position = fromOffset(0, labelled and 11 or 0),
-        Size = UDim2.new(1, 0, 0, cfg.height),
+        Size = UDim2.new(1, 0, 1, labelled and -11 or 0),
     }, { { "border" } }, "element")
+    if cfg.fill then
+        -- Fill = true: the list takes the height the section has left
+        self:Stretch(row, cfg.height + (labelled and 11 or 0))
+    end
     local scroll = New("ScrollingFrame", {
         Parent = fill,
         Size = UDim2.fromScale(1, 1),
@@ -3004,7 +3680,7 @@ function Section:List(properties)
 
     local function render()
         for option, entry in rows do
-            Library:Bind(entry, "TextColor3", option == list.Value and "accent_text" or "text")
+            Library:Bind(entry, "TextColor3", option == list.Value and "accent_text" or "text", "Elements")
         end
     end
 
@@ -3102,6 +3778,532 @@ function Section:Divider(properties)
     end
 
     return Finish(divider, cfg, row)
+end
+
+--// Character viewport ----------------------------------------------------------
+-- A character in a ViewportFrame, shared by the part picker and the esp preview.
+-- Viewports have no picking or projection of their own, so the camera maths
+-- lives here.
+
+local CornerSigns = {}
+for x = -1, 1, 2 do
+    for y = -1, 1, 2 do
+        for z = -1, 1, 2 do
+            table.insert(CornerSigns, Vector3.new(x, y, z) / 2)
+        end
+    end
+end
+
+-- The eight corners of a part's box, in world space.
+local function Corners(part)
+    local corners, frame, size = table.create(8), part.CFrame, part.Size
+    for index, sign in CornerSigns do
+        corners[index] = frame:PointToWorldSpace(size * sign)
+    end
+    return corners
+end
+
+-- The parts of a rig that make up its body: its direct children, minus the root.
+local function BodyParts(model)
+    local parts = {}
+    for _, child in model:GetChildren() do
+        if child:IsA("BasePart") and child.Name ~= "HumanoidRootPart" then
+            table.insert(parts, child)
+        end
+    end
+    return parts
+end
+
+-- A blocky stand-in for when there is no character to copy.
+local function CreateDummy()
+    local model = Instance.new("Model")
+    model.Name = "Dummy"
+    local function block(name, size, position)
+        local part = Instance.new("Part")
+        part.Name = name
+        part.Size = size
+        part.CFrame = CFrame.new(position)
+        part.Anchored = true
+        part.CanCollide = false
+        part.Color = rgb(163, 162, 165)
+        part.Material = Enum.Material.SmoothPlastic
+        part.Parent = model
+        return part
+    end
+    block("Head", Vector3.new(1.2, 1.2, 1.2), Vector3.new(0, 4.6, 0))
+    model.PrimaryPart = block("Torso", Vector3.new(2, 2, 1), Vector3.new(0, 3, 0))
+    block("Left Arm", Vector3.new(1, 2, 1), Vector3.new(-1.5, 3, 0))
+    block("Right Arm", Vector3.new(1, 2, 1), Vector3.new(1.5, 3, 0))
+    block("Left Leg", Vector3.new(1, 2, 1), Vector3.new(-0.5, 1, 0))
+    block("Right Leg", Vector3.new(1, 2, 1), Vector3.new(0.5, 1, 0))
+    return model
+end
+
+local function CharacterView(parent, properties)
+    local cfg = Options(properties, { padding = 1.15, rotate = true })
+    local view = { Model = nil, Parts = {}, Yaw = 0, Changed = Signal.new() }
+
+    local viewport = New("ViewportFrame", {
+        Parent = parent,
+        Size = UDim2.fromScale(1, 1),
+        Ambient = rgb(200, 200, 200),
+        LightColor = WHITE,
+    })
+    local world = New("WorldModel", { Parent = viewport })
+    local camera = New("Camera", { FieldOfView = 30, Parent = viewport })
+    viewport.CurrentCamera = camera
+    view.Frame, view.World, view.Camera = viewport, world, camera
+
+    -- the body's box, in the space the character faces
+    local centre, extents, facing = Vector3.zero, Vector3.new(4, 6, 2), CFrame.identity
+
+    -- tan of half the field of view, and the viewport's width over its height
+    local function lens()
+        local size = viewport.AbsoluteSize
+        return math.tan(math.rad(camera.FieldOfView / 2)), (size.X > 0 and size.Y > 0) and size.X / size.Y or 1
+    end
+
+    -- Puts the camera where the whole body fits, turned by the current yaw.
+    function view:Focus()
+        local half, aspect = lens()
+        local width = math.max(extents.X, extents.Z) -- wide enough for any yaw
+        local distance = math.max(extents.Y / 2 / half, width / 2 / (half * aspect)) * cfg.padding + width / 2
+        local orbit = CFrame.new(centre) * facing * CFrame.Angles(0, self.Yaw, 0)
+        camera.CFrame = CFrame.lookAt(orbit:PointToWorldSpace(Vector3.new(0, 0, -distance)), centre)
+        self.Changed:Fire()
+    end
+
+    -- Shows a copy of `character` (any rig), or the stand-in dummy without one.
+    function view:SetCharacter(character)
+        world:ClearAllChildren()
+        local model
+        if typeof(character) == "Instance" then
+            local ok, clone = pcall(function()
+                character.Archivable = true
+                return character:Clone()
+            end)
+            model = ok and clone or nil
+        end
+        if model then
+            for _, descendant in model:GetDescendants() do
+                if descendant:IsA("LuaSourceContainer") or descendant:IsA("Sound") then
+                    descendant:Destroy()
+                elseif descendant:IsA("BasePart") then
+                    descendant.Anchored = true
+                end
+            end
+        end
+        if not model or #BodyParts(model) == 0 then
+            model = CreateDummy()
+        end
+        model.Parent = world
+        self.Model = model
+        self.Parts = BodyParts(model)
+
+        -- frame the body itself rather than hats and tools
+        local ok, pivot = pcall(function()
+            return model:GetPivot()
+        end)
+        facing = ok and pivot.Rotation or CFrame.identity
+        local low, high
+        for _, part in self.Parts do
+            for _, corner in Corners(part) do
+                local point = facing:PointToObjectSpace(corner)
+                low = low and low:Min(point) or point
+                high = high and high:Max(point) or point
+            end
+        end
+        centre = facing:PointToWorldSpace((low + high) / 2)
+        extents = high - low
+        self:Focus()
+        return model
+    end
+
+    -- World position -> where it is drawn in the viewport, as a 0-1 scale on both
+    -- axes (nil when it is behind the camera).
+    function view:Project(position)
+        local point = camera.CFrame:PointToObjectSpace(position)
+        if point.Z >= 0 then
+            return nil
+        end
+        local half, aspect = lens()
+        local reach = half * -point.Z
+        return Vector2.new(0.5 + point.X / (reach * aspect) / 2, 0.5 - point.Y / reach / 2)
+    end
+
+    -- The rectangle `parts` cover on screen, as 0-1 scales; the whole body by default.
+    function view:Bounds(parts)
+        local low, high
+        for _, part in parts or self.Parts do
+            for _, corner in Corners(part) do
+                local point = self:Project(corner)
+                if point then
+                    low = low and low:Min(point) or point
+                    high = high and high:Max(point) or point
+                end
+            end
+        end
+        return low, high
+    end
+
+    -- The body part under a screen point (the space Utility.Pointer works in), if any.
+    function view:Pick(point)
+        local position, size = viewport.AbsolutePosition, viewport.AbsoluteSize
+        if size.X <= 0 or size.Y <= 0 then
+            return nil
+        end
+        local half, aspect = lens()
+        local origin = camera.CFrame.Position
+        local direction = camera.CFrame:VectorToWorldSpace(Vector3.new(
+            ((point.X - position.X) / size.X * 2 - 1) * half * aspect,
+            (1 - (point.Y - position.Y) / size.Y * 2) * half,
+            -1
+        ))
+
+        local nearest, best = nil, math.huge
+        for _, part in self.Parts do
+            -- the ray against the part's box, worked out in the part's own space
+            local start = part.CFrame:PointToObjectSpace(origin)
+            local heading = part.CFrame:VectorToObjectSpace(direction)
+            local reach = part.Size / 2
+            local enter, leave = -math.huge, math.huge
+            for _, axis in { "X", "Y", "Z" } do
+                local from, along, limit = start[axis], heading[axis], reach[axis]
+                if math.abs(along) < 1e-6 then
+                    if math.abs(from) > limit then
+                        enter, leave = math.huge, -math.huge
+                    end
+                else
+                    local first, second = (-limit - from) / along, (limit - from) / along
+                    enter = math.max(enter, math.min(first, second))
+                    leave = math.min(leave, math.max(first, second))
+                end
+            end
+            if enter <= leave and leave > 0 and enter < best then
+                nearest, best = part, enter
+            end
+        end
+        return nearest
+    end
+
+    -- Dragging across `surface` turns the character; a press that stays put is a
+    -- click and runs `clicked(point)`.
+    function view:Listen(surface, clicked)
+        local pressed, travelled, last = false, 0, nil
+        Utility.Connect(surface.InputBegan, function(input)
+            if IsPress(input) then
+                pressed, travelled, last = true, 0, Utility.Pointer(input)
+            end
+        end)
+        Utility.Connect(UserInputService.InputChanged, function(input)
+            if not pressed or not IsMove(input) then
+                return
+            end
+            local point = Utility.Pointer(input)
+            travelled += math.abs(point.X - last.X) + math.abs(point.Y - last.Y)
+            if cfg.rotate and travelled > 4 then
+                view.Yaw += (point.X - last.X) * 0.02
+                view:Focus()
+            end
+            last = point
+        end)
+        Utility.Connect(UserInputService.InputEnded, function(input)
+            if pressed and IsPress(input) then
+                pressed = false
+                if travelled <= 4 and clicked then
+                    clicked(Utility.Pointer(input))
+                end
+            end
+        end)
+    end
+
+    Utility.Connect(viewport:GetPropertyChangedSignal("AbsoluteSize"), function()
+        view:Focus()
+    end)
+    return view
+end
+
+Utility.CharacterView = CharacterView
+
+--// Part picker -----------------------------------------------------------------
+
+-- Ready-made groups for Section:PartPicker({ Groups = Library.PartGroups });
+-- the same names work on R6 and R15 characters.
+Library.PartGroups = {
+    { "head", { "Head" } },
+    { "chest", { "UpperTorso", "Torso" } },
+    { "stomach", { "LowerTorso" } },
+    {
+        "arms",
+        {
+            "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand",
+            "Left Arm", "Right Arm",
+        },
+    },
+    {
+        "legs",
+        {
+            "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot",
+            "Left Leg", "Right Leg",
+        },
+    },
+}
+
+-- Groups come as a list of { name, { part names } }, which keeps its order, or
+-- as a dictionary of name -> { part names }, which is sorted by name.
+local function PartGroups(groups)
+    local list = {}
+    if #groups > 0 then
+        for _, group in groups do
+            table.insert(list, { Name = tostring(group[1] or group.Name), Parts = group[2] or group.Parts or {} })
+        end
+    else
+        for name, parts in groups do
+            table.insert(list, { Name = tostring(name), Parts = parts })
+        end
+        table.sort(list, function(a, b)
+            return a.Name < b.Name
+        end)
+    end
+    return list
+end
+
+-- A character in a viewport whose parts are clicked to pick them. Picked parts
+-- wear a block in the accent colour, the others nothing. Multi = true picks
+-- several (at most Max); dragging turns the character.
+function Section:PartPicker(properties)
+    local cfg = Options(properties, { name = "", multi = false, height = 150 })
+    local multi = cfg.multi == true
+    local picker = {
+        Class = "PartPicker",
+        Name = cfg.name,
+        Multi = multi,
+        Options = {}, -- what can be picked: part names, or group names with Groups
+        Value = multi and {} or nil,
+    }
+    local labelled = cfg.name ~= ""
+
+    local row = self:Row(cfg.height + (labelled and 11 or 0))
+    if labelled then
+        picker.Label = Utility.Text("text", {
+            Parent = row,
+            Position = fromOffset(7, -1),
+            Size = UDim2.new(1, -14, 0, 10),
+            Text = cfg.name,
+            TextXAlignment = Left,
+        })
+    end
+    local _, fill = Utility.Box({
+        Parent = row,
+        Position = fromOffset(0, labelled and 11 or 0),
+        Size = UDim2.new(1, 0, 1, labelled and -11 or 0),
+    }, { { "border" } }, "element")
+    if cfg.fill then
+        self:Stretch(row, cfg.height + (labelled and 11 or 0))
+    end
+
+    local view = CharacterView(fill, { Padding = 1.1 })
+    local surface = New("TextButton", { Parent = fill, Size = UDim2.fromScale(1, 1), ZIndex = 2 })
+    picker.View = view
+
+    local owner = {} -- part name -> the option it belongs to
+    local blocks = {} -- option -> the blocks standing on its parts
+    local recent = {} -- picked options, oldest first (Max drops from the front)
+    local following = cfg.character == nil -- no Character given: follow the local player's
+
+    local function chosen(option)
+        if multi then
+            return table.find(picker.Value, option) ~= nil
+        end
+        return picker.Value == option
+    end
+
+    local function highlight(option, on)
+        for _, block in blocks[option] or {} do
+            Utility.Destroy(block)
+        end
+        blocks[option] = nil
+        if not on then
+            return
+        end
+        local list = {}
+        for _, part in view.Parts do
+            if owner[part.Name] == option then
+                local size = part.Size
+                -- classic heads are a small mesh inside a wide part
+                local mesh = part:FindFirstChildOfClass("SpecialMesh")
+                if mesh and mesh.MeshType == Enum.MeshType.Head then
+                    size = Vector3.new(size.Y, size.Y, size.Z) * 1.25
+                end
+                table.insert(list, New("Part", {
+                    Parent = view.World,
+                    Name = "Selection",
+                    Anchored = true,
+                    CanCollide = false,
+                    Material = Enum.Material.Neon,
+                    Color = "accent",
+                    Transparency = 0.25,
+                    Size = size + Vector3.new(0.12, 0.12, 0.12),
+                    CFrame = part.CFrame,
+                }))
+            end
+        end
+        blocks[option] = list
+    end
+
+    local function render()
+        for _, option in picker.Options do
+            local on = chosen(option)
+            if on ~= (blocks[option] ~= nil) then
+                highlight(option, on)
+            end
+        end
+    end
+
+    function picker:Set(newValue, silent)
+        if multi then
+            local list = {}
+            if type(newValue) == "table" then
+                -- keep the option order so saved configs stay stable
+                for _, option in self.Options do
+                    if table.find(newValue, option) then
+                        table.insert(list, option)
+                    end
+                end
+            elseif newValue ~= nil and table.find(self.Options, newValue) then
+                list = { newValue }
+            end
+            if cfg.max then
+                for index = #list, cfg.max + 1, -1 do
+                    list[index] = nil
+                end
+            end
+            -- forget what is gone, remember what is new
+            for index = #recent, 1, -1 do
+                if not table.find(list, recent[index]) then
+                    table.remove(recent, index)
+                end
+            end
+            for _, option in list do
+                if not table.find(recent, option) then
+                    table.insert(recent, option)
+                end
+            end
+            self.Value = list
+        else
+            self.Value = (newValue ~= nil and table.find(self.Options, newValue)) and newValue or nil
+        end
+        render()
+        Library:SetFlag(cfg.flag, self.Value)
+        self.Changed:Fire(self.Value)
+        if not silent then
+            Utility.Call(cfg.callback, self.Value)
+        end
+    end
+
+    function picker:Get()
+        return self.Value
+    end
+
+    -- Works out what can be picked on the character that is shown.
+    local function show(character)
+        for option in blocks do
+            highlight(option, false)
+        end
+        view:SetCharacter(character)
+
+        table.clear(owner)
+        table.clear(picker.Options)
+        if cfg.groups then
+            for _, group in PartGroups(cfg.groups) do
+                for _, name in group.Parts do
+                    owner[name] = group.Name
+                end
+                table.insert(picker.Options, group.Name)
+            end
+        else
+            local names = cfg.parts
+            if not names then
+                names = {}
+                for _, part in view.Parts do
+                    table.insert(names, part.Name)
+                end
+                table.sort(names)
+            end
+            for _, name in names do
+                owner[name] = name
+                table.insert(picker.Options, name)
+            end
+        end
+    end
+
+    -- A model to show instead of the local player's character; false for the dummy.
+    function picker:SetCharacter(character)
+        following = false
+        show(character)
+        self:Set(self.Value, true)
+    end
+
+    view:Listen(surface, function(point)
+        local part = view:Pick(point)
+        local option = part and owner[part.Name]
+        if not option then
+            return
+        end
+        if not multi then
+            if picker.Value ~= option then
+                picker:Set(option)
+            elseif cfg.allownone then
+                picker:Set(nil)
+            end
+            return
+        end
+        local list = table.clone(picker.Value)
+        local at = table.find(list, option)
+        if at then
+            table.remove(list, at)
+        else
+            -- Max = 3: the part picked longest ago makes room for the new one
+            local oldest = cfg.max and #list >= cfg.max and table.find(list, recent[1])
+            if oldest then
+                table.remove(list, oldest)
+            end
+            table.insert(list, option)
+        end
+        picker:Set(list)
+    end)
+
+    Finish(picker, cfg, row)
+    Library:RegisterFlag(cfg.flag, {
+        Save = cfg.save,
+        Get = function()
+            return picker.Value
+        end,
+        Set = function(saved)
+            picker:Set(saved)
+        end,
+    })
+
+    local character = cfg.character
+    if character == nil then
+        character = LocalPlayer and LocalPlayer.Character
+    end
+    show(character)
+    if cfg.default ~= nil then
+        picker:Set(cfg.default)
+    else
+        picker:Set(multi and {} or nil)
+    end
+    if following and LocalPlayer then
+        Utility.Connect(LocalPlayer.CharacterAdded, function(added)
+            task.wait(1) -- let the appearance load before copying it
+            if following and not Library.Unloaded then
+                show(added)
+                picker:Set(picker.Value, true)
+            end
+        end)
+    end
+    return picker
 end
 
 --// Brand text ------------------------------------------------------------------
@@ -3942,14 +5144,400 @@ function Library:Hitlogs(properties)
     return logs
 end
 
--- Shows a message through the hitlog stack when there is one.
+--// Notifications ---------------------------------------------------------------
+
+-- Line and title colours per notification type. Add your own:
+-- Library.NotificationTypes.vip = { Line = Color3.new(1, 0.8, 0), Title = "text" }
+Library.NotificationTypes = {
+    info = { Line = "accent", Title = "accent_text" },
+    success = { Line = rgb(120, 220, 110), Title = rgb(120, 220, 110) },
+    warning = { Line = rgb(235, 180, 70), Title = rgb(235, 180, 70) },
+    error = { Line = rgb(220, 80, 80), Title = rgb(220, 80, 80) },
+}
+
+-- Where the stack can sit: its name and the corner it is anchored to.
+local NotificationPositions = {
+    topleft = { "TopLeft", Vector2.new(0, 0) },
+    topcenter = { "TopCenter", Vector2.new(0.5, 0) },
+    topright = { "TopRight", Vector2.new(1, 0) },
+    bottomleft = { "BottomLeft", Vector2.new(0, 1) },
+    bottomcenter = { "BottomCenter", Vector2.new(0.5, 1) },
+    bottomright = { "BottomRight", Vector2.new(1, 1) },
+}
+
+-- "Top Right", "top_right" and "topright" are all the same name.
+local function Squash(name)
+    return (string.gsub(string.lower(tostring(name)), "[%s_%-]", ""))
+end
+
+-- The notification stack. Library:Notification creates it with these defaults
+-- on first use; call this yourself to choose where and how it shows.
+function Library:Notifications(properties)
+    self:Load()
+    if self.Components.Notifications then
+        return self.Components.Notifications
+    end
+    local cfg = Options(properties, {
+        position = "TopRight",
+        margin = Vector2.new(12, 40), -- from the screen edges
+        width = 230,
+        max = 6,
+        duration = 5,
+        animation = "Slide", -- Slide, Bounce, Back or Fade
+        speed = 0.3,
+    })
+
+    local stack = New("Frame", {
+        Name = "Notifications",
+        Parent = self.Overlay,
+        Size = fromOffset(cfg.width, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1,
+        ZIndex = 30,
+    })
+    local layout = New("UIListLayout", { Parent = stack, Padding = UDim.new(0, 4) })
+
+    local notifications = {
+        Frame = stack,
+        Entries = {},
+        Enabled = cfg.visible ~= false,
+        Position = "TopRight",
+        Margin = ToVector2(cfg.margin, Vector2.new(12, 40)),
+        Max = cfg.max,
+        Duration = cfg.duration,
+        Animation = LogAnimations[string.lower(tostring(cfg.animation))] or "Slide",
+        Speed = cfg.speed,
+        VisibilityChanged = Signal.new(),
+    }
+    local anchor = Vector2.new(1, 0)
+    local counter = 0
+
+    -- where a card starts (and ends) its flight: the side the stack is on, or
+    -- above / below for the centred stacks
+    local function away()
+        if anchor.X == 0.5 then
+            return Vector2.new(0, anchor.Y == 1 and 30 or -30)
+        end
+        return Vector2.new((anchor.X == 1 and 1 or -1) * (cfg.width + 40), 0)
+    end
+
+    -- notifications:SetPosition("BottomRight", Vector2.new(12, 12))
+    function notifications:SetPosition(position, margin)
+        local place = NotificationPositions[Squash(position)] or NotificationPositions.topright
+        self.Position, anchor = place[1], place[2]
+        self.Margin = ToVector2(margin, self.Margin)
+        stack.AnchorPoint = anchor
+        stack.Position = UDim2.new(
+            anchor.X,
+            (1 - anchor.X * 2) * self.Margin.X,
+            anchor.Y,
+            (1 - anchor.Y * 2) * self.Margin.Y
+        )
+        layout.VerticalAlignment = anchor.Y == 1 and Enum.VerticalAlignment.Bottom or Enum.VerticalAlignment.Top
+    end
+
+    function notifications:IsVisible()
+        return self.Enabled
+    end
+
+    -- Switching notifications off also closes the ones on screen.
+    function notifications:SetVisible(visible)
+        visible = visible == true
+        if self.Enabled == visible then
+            return
+        end
+        self.Enabled = visible
+        if not visible then
+            self:Clear()
+        end
+        self.VisibilityChanged:Fire(visible)
+    end
+
+    function notifications:Toggle()
+        self:SetVisible(not self.Enabled)
+    end
+
+    function notifications:Clear()
+        for _, notification in table.clone(self.Entries) do
+            notification:Close()
+        end
+    end
+
+    -- notifications:Add({ Title = "saved", Text = "legit.cfg", Type = "success", Duration = 4 })
+    function notifications:Add(properties)
+        local options = Options(properties, { type = "info", duration = self.Duration })
+        if not self.Enabled or Library.Unloaded then
+            return nil
+        end
+        while #self.Entries >= math.max(1, self.Max) do
+            self.Entries[1]:Close()
+        end
+        counter += 1
+
+        local notification = {
+            Type = "info",
+            Duration = tonumber(options.duration) or 0, -- 0: stays until it is closed
+            Elapsed = 0,
+            Closed = false,
+        }
+
+        -- the holder keeps the entry's place in the stack while the card flies inside it
+        local holder = New("Frame", {
+            Parent = stack,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            ClipsDescendants = false,
+            LayoutOrder = counter,
+        })
+        local card = New("Frame", {
+            Parent = holder,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundColor3 = "outline",
+            Active = true,
+        })
+        New("UIPadding", {
+            Parent = card,
+            PaddingTop = UDim.new(0, 2),
+            PaddingBottom = UDim.new(0, 2),
+            PaddingLeft = UDim.new(0, 2),
+            PaddingRight = UDim.new(0, 2),
+        })
+        local body = New("Frame", {
+            Parent = card,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundColor3 = "background",
+        })
+        New("UIStroke", { Parent = body, Color = "inline" }) -- the window's inline, inside the outline
+        New("UIListLayout", { Parent = body })
+        local line = New("Frame", { Parent = body, Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = "accent", LayoutOrder = 1 })
+        local content = New("Frame", {
+            Parent = body,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            LayoutOrder = 2,
+        })
+        New("UIPadding", {
+            Parent = content,
+            PaddingTop = UDim.new(0, 4),
+            PaddingBottom = UDim.new(0, 5),
+            PaddingLeft = UDim.new(0, 6),
+            PaddingRight = UDim.new(0, 6),
+        })
+        New("UIListLayout", { Parent = content, Padding = UDim.new(0, 3) })
+
+        local function label(order)
+            return Utility.Text("hud", {
+                Parent = content,
+                Size = UDim2.new(1, 0, 0, 0),
+                AutomaticSize = Enum.AutomaticSize.Y,
+                RichText = true,
+                TextWrapped = true,
+                TextXAlignment = Left,
+                LayoutOrder = order,
+            })
+        end
+        local title, text = label(1), label(2)
+
+        -- Buttons = { { Name = "undo", Callback = fn }, ... }; a button closes the
+        -- notification unless it has Close = false
+        local actions = options.buttons or options.actions
+        if type(actions) == "table" and #actions > 0 then
+            local row = New("Frame", {
+                Parent = content,
+                Size = UDim2.new(1, 0, 0, 16),
+                BackgroundTransparency = 1,
+                LayoutOrder = 3,
+            })
+            for index, action in actions do
+                local settings = Options(action, { name = "ok" })
+                local slotPosition, slotSize = ButtonSlot(index, #actions, 4)
+                CreateButton(row, {
+                    Name = settings.name,
+                    Callback = function()
+                        Utility.Call(settings.callback, notification)
+                        if settings.close ~= false then
+                            notification:Close()
+                        end
+                    end,
+                }, slotPosition, slotSize)
+            end
+        end
+
+        local track = New("Frame", { Parent = body, Size = UDim2.new(1, 0, 0, 2), BackgroundColor3 = "track", LayoutOrder = 3 })
+        local bar = New("Frame", { Parent = track, Size = UDim2.fromScale(1, 1), BackgroundColor3 = "accent" })
+
+        local function write(target, value)
+            target.Text = (value == nil or value == "") and "" or RichParts(value)
+            target.Visible = target.Text ~= ""
+        end
+
+        -- Text takes a string or the same { "plain", { "coloured" } } parts as hitlogs.
+        function notification:SetTitle(value)
+            write(title, value)
+        end
+
+        function notification:SetText(value)
+            write(text, value)
+        end
+
+        function notification:SetType(name)
+            self.Type = string.lower(tostring(name))
+            local kind = Library.NotificationTypes[self.Type] or Library.NotificationTypes.info
+            Library:Bind(line, "BackgroundColor3", kind.Line)
+            Library:Bind(bar, "BackgroundColor3", kind.Line)
+            Library:Bind(title, "TextColor3", kind.Title or kind.Line)
+        end
+
+        -- The bar shows the time left, or what SetProgress reported.
+        function notification:Render()
+            local alpha = self.Progress
+            if alpha == nil and self.Duration > 0 then
+                alpha = 1 - math.clamp(self.Elapsed / self.Duration, 0, 1)
+            end
+            track.Visible = alpha ~= nil and options.progress ~= false
+            bar.Size = UDim2.fromScale(alpha or 0, 1)
+        end
+
+        -- 0-1 sets the bar by hand, for progress you report yourself; nil gives
+        -- it back to the timer.
+        function notification:SetProgress(alpha)
+            self.Progress = alpha ~= nil and math.clamp(tonumber(alpha) or 0, 0, 1) or nil
+            self:Render()
+        end
+
+        -- Restarts the timer; 0 keeps the notification until it is closed.
+        function notification:SetDuration(duration)
+            self.Duration, self.Elapsed = tonumber(duration) or 0, 0
+            self:Render()
+        end
+
+        function notification:Close()
+            if self.Closed then
+                return
+            end
+            self.Closed = true
+            local index = table.find(notifications.Entries, self)
+            if index then
+                table.remove(notifications.Entries, index)
+            end
+            Utility.Call(options.closed, self)
+
+            if not Utility.Animated("Notifications") then
+                Utility.Destroy(holder)
+                return
+            end
+            local to, fading = away(), notifications.Animation == "Fade"
+            local items = Utility.Fades(card)
+            local height = holder.AbsoluteSize.Y / Library.Scale
+            Utility.Animate(Utility.Duration(notifications.Speed), function(alpha)
+                local eased = alpha * alpha
+                Utility.Fade(items, 1 - eased)
+                if not fading then
+                    card.Position = fromOffset(math.floor(to.X * eased + 0.5), math.floor(to.Y * eased + 0.5))
+                end
+            end, function()
+                -- then the gap closes, so the rest of the stack glides together
+                card.Visible = false
+                holder.AutomaticSize = Enum.AutomaticSize.None
+                holder.Size = UDim2.new(1, 0, 0, height)
+                local tween = Utility.Motion("Notifications", holder, { Size = UDim2.new(1, 0, 0, 0) }, 0.12)
+                if tween then
+                    tween.Completed:Connect(function()
+                        Utility.Destroy(holder)
+                    end)
+                else
+                    Utility.Destroy(holder)
+                end
+            end)
+        end
+
+        if options.closable ~= false then
+            -- a click anywhere on the card (but not on its buttons) dismisses it
+            card.InputBegan:Connect(function(input)
+                if IsPress(input) then
+                    notification:Close()
+                end
+            end)
+        end
+
+        table.insert(self.Entries, notification)
+        notification:SetType(options.type)
+        write(title, options.title)
+        write(text, options.text or options.description or options.content or options.name)
+        notification:Render()
+
+        if Utility.Animated("Notifications") then
+            local from, fading = away(), self.Animation == "Fade"
+            local ease = Utility.Easing[self.Animation == "Slide" and "Smooth" or self.Animation] or Utility.Easing.Smooth
+            local items = Utility.Fades(card)
+            Utility.Fade(items, 0)
+            if not fading then
+                card.Position = fromOffset(from.X, from.Y)
+            end
+            Utility.Animate(Utility.Duration(self.Speed), function(alpha)
+                if notification.Closed then
+                    return
+                end
+                Utility.Fade(items, alpha)
+                if not fading then
+                    local at = from:Lerp(Vector2.zero, ease(alpha))
+                    card.Position = fromOffset(math.floor(at.X + 0.5), math.floor(at.Y + 0.5))
+                end
+            end)
+        end
+        return notification
+    end
+
+    Utility.Connect(RunService.RenderStepped, function(delta)
+        if #notifications.Entries == 0 then
+            return
+        end
+        for _, notification in table.clone(notifications.Entries) do
+            if notification.Duration > 0 then
+                notification.Elapsed += delta
+                notification:Render()
+                if notification.Elapsed >= notification.Duration then
+                    notification:Close()
+                end
+            end
+        end
+    end)
+
+    Library:RegisterFlag("show_notifications", {
+        Get = function()
+            return notifications.Enabled
+        end,
+        Set = function(value)
+            notifications:SetVisible(value == true)
+        end,
+    })
+
+    notifications:SetPosition(cfg.position)
+    self.Components.Notifications = notifications
+    return notifications
+end
+
+-- Library:Notification({ Title = "saved", Text = "legit.cfg", Type = "success" })
+function Library:Notification(properties)
+    return (self.Components.Notifications or self:Notifications()):Add(properties)
+end
+
+-- A one-line message: through the hitlog stack when there is one, otherwise as
+-- a notification. An option table ({ Title = ..., Text = ... }) is always a
+-- notification.
 function Library:Notify(parts, duration)
+    if type(parts) == "table" and #parts == 0 and next(parts) ~= nil then
+        return self:Notification(parts)
+    end
     local logs = self.Components.Hitlogs
     if logs and logs.Enabled then
         return logs:Add(parts, { Duration = duration })
     end
-    print(string.format("[%s] %s", self.Name, (string.gsub(RichParts(parts), "<[^>]+>", ""))))
-    return nil
+    return self:Notification({ Text = parts, Duration = duration })
 end
 
 --// Target hud ------------------------------------------------------------------
@@ -4476,75 +6064,238 @@ end
 
 --// Esp preview -----------------------------------------------------------------
 
+-- The names preview:Set, :SetColor and :Bind take, however they are spaced.
+local PreviewElements = {
+    box = "Box", name = "Name", health = "Health", healthbar = "Health", distance = "Distance",
+    weapon = "Weapon", tool = "Weapon", skeleton = "Skeleton",
+}
+
+-- Joints of R15 and R6 rigs, as pairs of part names.
+local Bones = {
+    { "Head", "UpperTorso" }, { "UpperTorso", "LowerTorso" },
+    { "UpperTorso", "LeftUpperArm" }, { "LeftUpperArm", "LeftLowerArm" }, { "LeftLowerArm", "LeftHand" },
+    { "UpperTorso", "RightUpperArm" }, { "RightUpperArm", "RightLowerArm" }, { "RightLowerArm", "RightHand" },
+    { "LowerTorso", "LeftUpperLeg" }, { "LeftUpperLeg", "LeftLowerLeg" }, { "LeftLowerLeg", "LeftFoot" },
+    { "LowerTorso", "RightUpperLeg" }, { "RightUpperLeg", "RightLowerLeg" }, { "RightLowerLeg", "RightFoot" },
+    { "Head", "Torso" }, { "Torso", "Left Arm" }, { "Torso", "Right Arm" }, { "Torso", "Left Leg" },
+    { "Torso", "Right Leg" },
+}
+
+-- A window with the player's character in a viewport and the esp drawn on it:
+-- box, name, health bar, distance, weapon and skeleton, each switched and
+-- coloured from code or bound to the menu's own toggles and colour pickers.
 function Library:EspPreview(properties)
-    self:Load()
     local cfg = Options(properties, {
         name = "esp preview",
-        text = "no preview for ya today",
+        text = "",
         size = Vector2.new(229, 352),
         position = Vector2.new(655, 112),
         character = true,
     })
     cfg.id = "preview"
-    local size = ToVector2(cfg.size, Vector2.new(229, 352))
-    local position = ToVector2(cfg.position, Vector2.new(655, 112))
+    cfg.tabs, cfg.columns = false, 1
 
-    local frame = New("Frame", {
-        Name = "Preview",
-        Parent = self.Root,
-        Position = fromOffset(position.X, position.Y),
-        Size = fromOffset(size.X, size.Y),
-        BackgroundColor3 = "element_outline",
-        Active = true,
-    })
-    local preview = setmetatable({ Frame = frame }, Panel)
+    local preview = self:Window(cfg)
+    local section = preview:Section({ Name = "preview" })
+    local row = section:Row(120)
+    section:Stretch(row, 120)
 
-    preview.Title = Utility.Text("preview_title", {
-        Parent = frame,
-        Size = UDim2.new(1, 0, 0, 37),
-        Text = cfg.name,
-        TextColor3 = "accent_text",
-    })
-    local _, fill = Utility.Box({
-        Parent = frame,
-        Position = fromOffset(2, 37),
-        Size = UDim2.new(1, -4, 1, -39),
-    }, { { "inline" } }, "background")
-    preview.Holder = fill -- parent your own preview overlays here
-
+    local view = CharacterView(row, { Padding = 1.5 }) -- room around the body for the esp
     local image = New("ImageLabel", {
-        Parent = fill,
-        Position = fromOffset(0, 4),
-        Size = UDim2.new(1, 0, 1, -8),
+        Parent = row,
+        Size = UDim2.fromScale(1, 1),
         ScaleType = Enum.ScaleType.Fit,
         Visible = false,
     })
-    local viewport = New("ViewportFrame", {
-        Parent = fill,
-        Position = fromOffset(0, 4),
-        Size = UDim2.new(1, 0, 1, -8),
-        Ambient = rgb(200, 200, 200),
-        LightColor = WHITE,
-        Visible = false,
-    })
-    local world = New("WorldModel", { Parent = viewport })
-    local camera = New("Camera", { FieldOfView = 30, Parent = viewport })
-    viewport.CurrentCamera = camera
+    local overlay = New("Frame", { Parent = row, Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 2 })
+    local surface = New("TextButton", { Parent = row, Size = UDim2.fromScale(1, 1), ZIndex = 3 })
+    view:Listen(surface) -- drag to turn the character
+    preview.View = view
+    preview.Holder = overlay -- parent your own preview overlays here
 
-    preview.Label = Utility.Text("hud", {
-        Parent = fill,
-        Position = UDim2.new(0, 5, 1, -15),
-        Size = UDim2.new(1, -10, 0, 14),
+    preview.Label = Utility.Text("text", {
+        Parent = overlay,
+        AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, 3, 1, -2),
+        Size = UDim2.new(1, -6, 0, 10),
         Text = cfg.text,
+        TextColor3 = "text_dim",
         TextXAlignment = Left,
-        ZIndex = 3,
     })
+
+    local elements = {
+        Box = { Enabled = false, Color = WHITE },
+        Name = { Enabled = false, Color = WHITE, Text = LocalPlayer and LocalPlayer.DisplayName or "player" },
+        Health = { Enabled = false }, -- without a Color it goes from green to red with the health
+        Distance = { Enabled = false, Color = WHITE, Text = "25m" },
+        Weapon = { Enabled = false, Color = WHITE, Text = "weapon" },
+        Skeleton = { Enabled = false, Color = WHITE },
+    }
+    local health = 0.8
+
+    -- the box: a coloured line with a black one on each side of it
+    local box = New("Frame", { Parent = overlay, BackgroundTransparency = 1, Visible = false })
+    local boxStroke = New("UIStroke", { Parent = box, Color = WHITE })
+    for _, inset in { -1, 1 } do
+        local shade = New("Frame", {
+            Parent = box,
+            Position = fromOffset(inset, inset),
+            Size = UDim2.new(1, -inset * 2, 1, -inset * 2),
+            BackgroundTransparency = 1,
+        })
+        New("UIStroke", { Parent = shade, Color = BLACK })
+    end
+
+    local healthOuter = New("Frame", { Parent = overlay, BackgroundColor3 = BLACK, Visible = false })
+    local healthFill = New("Frame", {
+        Parent = healthOuter,
+        AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, 1, 1, -1),
+        BackgroundColor3 = WHITE,
+    })
+
+    local function caption(anchor)
+        return Utility.Text("text", {
+            Parent = overlay,
+            AnchorPoint = Vector2.new(0.5, anchor),
+            Size = fromOffset(200, 10),
+            Visible = false,
+        })
+    end
+    local nameLabel, distanceLabel, weaponLabel = caption(1), caption(0), caption(0)
+
+    local lines = {} -- skeleton bones, made as they are needed
+
+    -- Redraws the esp around wherever the character is in the viewport.
+    local function update()
+        local low, high = view:Bounds()
+        local drawn = low ~= nil and view.Frame.Visible
+        box.Visible = drawn and elements.Box.Enabled
+        healthOuter.Visible = drawn and elements.Health.Enabled
+        nameLabel.Visible = drawn and elements.Name.Enabled
+        distanceLabel.Visible = drawn and elements.Distance.Enabled
+        weaponLabel.Visible = drawn and elements.Weapon.Enabled
+        for _, bone in lines do
+            bone.Visible = false
+        end
+        if not drawn then
+            return
+        end
+        local middle = (low.X + high.X) / 2
+
+        box.Position = UDim2.fromScale(low.X, low.Y)
+        box.Size = UDim2.fromScale(high.X - low.X, high.Y - low.Y)
+        boxStroke.Color = elements.Box.Color
+
+        healthOuter.Position = UDim2.new(low.X, -6, low.Y, -1)
+        healthOuter.Size = UDim2.new(0, 4, high.Y - low.Y, 2)
+        healthFill.Size = UDim2.new(1, -2, health, -math.floor(health * 2 + 0.5))
+        healthFill.BackgroundColor3 = elements.Health.Color or rgb(220, 80, 80):Lerp(rgb(120, 220, 110), health)
+
+        nameLabel.Position = UDim2.new(middle, 0, low.Y, -5)
+        nameLabel.Text = elements.Name.Text
+        Library:Bind(nameLabel, "TextColor3", elements.Name.Color)
+        distanceLabel.Position = UDim2.new(middle, 0, high.Y, 5)
+        distanceLabel.Text = elements.Distance.Text
+        Library:Bind(distanceLabel, "TextColor3", elements.Distance.Color)
+        weaponLabel.Position = UDim2.new(middle, 0, high.Y, elements.Distance.Enabled and 16 or 5)
+        weaponLabel.Text = elements.Weapon.Text
+        Library:Bind(weaponLabel, "TextColor3", elements.Weapon.Color)
+
+        if elements.Skeleton.Enabled then
+            local area = overlay.AbsoluteSize / Library.Scale
+            local joints = {}
+            for _, part in view.Parts do
+                joints[part.Name] = view:Project(part.Position)
+            end
+            local used = 0
+            for _, pair in Bones do
+                local from, to = joints[pair[1]], joints[pair[2]]
+                if from and to then
+                    used += 1
+                    local bone = lines[used]
+                    if not bone then
+                        bone = New("Frame", { Parent = overlay, AnchorPoint = Vector2.new(0.5, 0.5), BackgroundColor3 = WHITE })
+                        lines[used] = bone
+                    end
+                    local delta = (to - from) * area
+                    bone.Position = UDim2.fromScale((from.X + to.X) / 2, (from.Y + to.Y) / 2)
+                    bone.Size = fromOffset(math.ceil(delta.Magnitude), 1)
+                    bone.Rotation = math.deg(math.atan2(delta.Y, delta.X))
+                    bone.BackgroundColor3 = elements.Skeleton.Color
+                    bone.Visible = true
+                end
+            end
+        end
+    end
+    view.Changed:Connect(update)
+
+    local function element(name)
+        return elements[PreviewElements[Squash(name)] or ""]
+    end
+
+    -- preview:Set("box", true) switches one esp element: box, name, health,
+    -- distance, weapon or skeleton.
+    function preview:Set(name, enabled)
+        local target = element(name)
+        if target then
+            target.Enabled = enabled == true
+            update()
+        end
+    end
+
+    -- A Color3, or nil to give the health bar its green-to-red colour back.
+    function preview:SetColor(name, color)
+        local target = element(name)
+        if target and (typeof(color) == "Color3" or (color == nil and target == elements.Health)) then
+            target.Color = color
+            update()
+        end
+    end
+
+    -- The text of the name, distance and weapon elements.
+    function preview:SetLabel(name, text)
+        local target = element(name)
+        if target and target.Text ~= nil then
+            target.Text = tostring(text)
+            update()
+        end
+    end
+
+    -- 0-1: how full the health bar is.
+    function preview:SetHealth(alpha)
+        health = math.clamp(tonumber(alpha) or 0, 0, 1)
+        update()
+    end
+
+    -- preview:Bind("box", "esp_box", "esp_box_color") makes an element follow a
+    -- toggle's flag and, optionally, a colour picker's.
+    function preview:Bind(name, flag, colorFlag)
+        if not element(name) then
+            return
+        end
+        local function enabled(value)
+            self:Set(name, value == true)
+        end
+        local function colored(value)
+            self:SetColor(name, type(value) == "table" and value.Color or value)
+        end
+        if flag ~= nil then
+            Library:OnChanged(flag, enabled)
+            enabled(Library.Flags[flag])
+        end
+        if colorFlag ~= nil then
+            Library:OnChanged(colorFlag, colored)
+            colored(Library.Flags[colorFlag])
+        end
+    end
 
     function preview:SetText(text)
         self.Label.Text = tostring(text or "")
     end
 
-    -- Accepts an rbxassetid:// id, or an http(s) image url on executors with getcustomasset.
+    -- Shows an image instead of the character: an rbxassetid:// id, or an http(s)
+    -- url on executors with getcustomasset. nil goes back to the character.
     function preview:SetImage(source)
         if type(source) == "string" and string.match(source, "^https?://") then
             local path = Library.Folder .. "/preview.png"
@@ -4560,222 +6311,178 @@ function Library:EspPreview(properties)
         end
         image.Image = source or ""
         image.Visible = source ~= nil and source ~= ""
-        viewport.Visible = false
+        view.Frame.Visible = not image.Visible
+        update()
         return true
     end
 
-    -- Shows a clone of a character model in the viewport (nil clears it).
+    local following = cfg.character == true -- keep up with the local player's respawns
+
+    -- Shows a copy of a character model; without one, the stand-in dummy.
     function preview:SetCharacter(character)
-        world:ClearAllChildren()
-        viewport.Visible = false
-        if typeof(character) ~= "Instance" then
-            return false
-        end
-        local ok, clone = pcall(function()
-            character.Archivable = true
-            return character:Clone()
-        end)
-        if not (ok and clone) then
-            return false
-        end
-        for _, descendant in clone:GetDescendants() do
-            if descendant:IsA("LuaSourceContainer") or descendant:IsA("Sound") then
-                descendant:Destroy()
-            elseif descendant:IsA("BasePart") then
-                descendant.Anchored = true
-            end
-        end
-        clone.Parent = world
-
-        local pivot, bounds = clone:GetBoundingBox()
-        local distance = (bounds.Y / 2) / math.tan(math.rad(camera.FieldOfView / 2)) + bounds.Z
-        camera.CFrame = CFrame.lookAt(pivot.Position + pivot.LookVector * distance * 1.1, pivot.Position)
+        following = false
         image.Visible = false
-        viewport.Visible = true
+        view.Frame.Visible = true
+        view:SetCharacter(character)
         return true
     end
 
-    local handle = New("Frame", { Parent = frame, Size = UDim2.new(1, 0, 0, 37), BackgroundTransparency = 1, Active = true })
-    Utility.Drag(handle, frame)
-
+    local character = cfg.character
+    if character == true then
+        character = LocalPlayer and LocalPlayer.Character
+    end
+    view:SetCharacter(character)
     if cfg.image then
         preview:SetImage(cfg.image)
-    elseif cfg.character and LocalPlayer then
-        task.spawn(function()
-            local character = LocalPlayer.Character
-            if character then
-                preview:SetCharacter(character)
-            end
-        end)
-        Utility.Connect(LocalPlayer.CharacterAdded, function(character)
-            task.wait(1) -- let the appearance load before cloning
-            if not Library.Unloaded and not image.Visible then
-                preview:SetCharacter(character)
+    elseif following and LocalPlayer then
+        Utility.Connect(LocalPlayer.CharacterAdded, function(added)
+            task.wait(1) -- let the appearance load before copying it
+            if following and not Library.Unloaded then
+                view:SetCharacter(added)
             end
         end)
     end
 
-    SetupPanel(preview, cfg)
     self.Components.Preview = preview
     return preview
 end
 
 --// Configs window --------------------------------------------------------------
 
--- The frame shared by the configs and lua windows: border, title and a container.
--- `header` is the title strip height and `bottom` the gap under the container.
-local function PanelWindow(name, cfg, layers, containerLayers, containerFill, header, titleY, bottom)
-    local size, position = ToVector2(cfg.size), ToVector2(cfg.position)
-    local frame, fill = Utility.Box({
-        Name = name,
-        Parent = Library.Root,
-        Position = fromOffset(position.X, position.Y),
-        Size = fromOffset(size.X, size.Y),
-        Active = true,
-    }, layers, "background")
-    local title = Utility.Text("panel_title", {
-        Parent = fill,
-        Position = fromOffset(0, titleY),
-        Size = UDim2.new(1, 0, 0, header),
-        Text = cfg.name,
-        TextColor3 = "accent_text",
-        ZIndex = 2,
-    })
-    local handle = New("Frame", { Parent = fill, Size = UDim2.new(1, 0, 0, header), BackgroundTransparency = 1, Active = true })
-    Utility.Drag(handle, frame)
-    local _, container = Utility.Box({
-        Parent = fill,
-        Position = fromOffset(4, header),
-        Size = UDim2.new(1, -8, 1, -header - bottom),
-    }, containerLayers, containerFill)
-    return frame, container, title
-end
-
+-- The config manager, built from the menu's own window, section and elements.
 function Library:Configs(properties)
-    self:Load()
     local cfg = Options(properties, {
         name = "configs",
-        size = Vector2.new(405, 343),
+        size = Vector2.new(229, 300),
         position = Vector2.new(904, 112),
     })
     cfg.id = "configs"
+    cfg.tabs, cfg.columns = false, 1
 
-    local frame, container = PanelWindow(
-        "Configs", cfg, { { "outline" }, { "inline" } }, { { "border" }, { "panel_inline" } }, "background", 42, 3, 4
-    )
-    local configs = setmetatable({ Frame = frame, Selected = nil, Rows = {} }, Panel)
+    local configs = self:Window(cfg)
+    configs.Selected = nil
+    local section = configs:Section({ Name = "configs" })
 
-    local _, listFill = Utility.Box({
-        Parent = container,
-        Position = fromOffset(3, 3),
-        Size = UDim2.new(1, -6, 1, -96),
-    }, { { "border" }, { "panel_inline" } }, "white")
-    Utility.Gradient(listFill, { "list_top", "list_bottom" })
-    local scroll = New("ScrollingFrame", {
-        Parent = listFill,
-        Size = UDim2.fromScale(1, 1),
-        ScrollBarImageColor3 = "accent",
-    })
-    New("UIListLayout", { Parent = scroll })
+    local list = section:List({ Height = 60, Fill = true })
+    list.Changed:Connect(function(name)
+        configs.Selected = name
+    end)
+    local nameBox = section:Textbox({ Name = "name", Placeholder = "new config" })
+    local autoload = section:Label({ Name = "autoload: none" })
+    configs.List = list
 
-    local function render()
-        for name, row in configs.Rows do
-            local selected = name == configs.Selected
-            row.Button.BackgroundTransparency = selected and 0 or 1
-            Library:Bind(row.Label, "TextColor3", selected and "accent_soft" or "text")
-        end
+    local function notify(text, kind)
+        Library:Notification({ Title = "configs", Text = text, Type = kind or "success" })
     end
 
     function configs:Select(name)
-        self.Selected = name
-        render()
+        list:Set(name, true)
     end
 
     -- Re-reads the config folder.
     function configs:Reload()
-        for _, row in self.Rows do
-            Utility.Destroy(row.Button)
-        end
-        table.clear(self.Rows)
-
         local names = Library:ListConfigs()
-        for index, name in names do
-            local button = New("TextButton", {
-                Parent = scroll,
-                Size = UDim2.new(1, 0, 0, 16),
-                BackgroundColor3 = "selected",
-                LayoutOrder = index,
-            })
-            local label = Utility.Text("panel_text", { Parent = button, Size = UDim2.fromScale(1, 1), Text = name })
-            self.Rows[name] = { Button = button, Label = label }
-            Utility.Connect(button.MouseButton1Click, function()
-                configs:Select(name)
-            end)
+        list:SetOptions(names)
+        if not (self.Selected and table.find(names, self.Selected)) then
+            list:Set(names[1], true)
         end
-        if not (self.Selected and self.Rows[self.Selected]) then
-            self.Selected = names[1]
-        end
-        render()
+        autoload:Set("autoload: " .. (Library:GetAutoload() or "none"))
     end
 
     function configs:Load()
-        if self.Selected and Library:LoadConfigFile(self.Selected) then
-            Library:Notify({ "loaded config ", { self.Selected } })
+        local name = self.Selected
+        if not name then
+            return false
         end
+        local loaded = Library:LoadConfigFile(name)
+        if loaded then
+            notify({ "loaded ", { name } })
+        else
+            notify({ "could not load ", { name } }, "error")
+        end
+        return loaded
     end
 
-    -- Saves the current settings as a new config; the name defaults to the next free number.
+    -- Saves the current settings as a new config: under `name`, else under what
+    -- is typed in the name box, else under the next free number.
     function configs:Save(name)
+        if name == nil or name == "" then
+            name = nameBox.Value
+        end
         local saved = Library:SaveConfig(name)
-        self.Selected = saved
+        nameBox:Set("", true)
         self:Reload()
-        Library:Notify({ "saved config ", { saved } })
+        list:Set(saved, true)
+        notify({ "saved ", { saved } })
         return saved
     end
 
     function configs:Rewrite()
-        if self.Selected then
-            Library:SaveConfig(self.Selected)
-            Library:Notify({ "rewrote config ", { self.Selected } })
+        local name = self.Selected
+        if name then
+            Library:SaveConfig(name)
+            notify({ "rewrote ", { name } })
         end
     end
 
     function configs:Delete()
-        if self.Selected then
-            local name = self.Selected
+        local name = self.Selected
+        if name then
             Library:DeleteConfig(name)
-            self.Selected = nil
             self:Reload()
-            Library:Notify({ "deleted config ", { name } })
+            notify({ "deleted ", { name } }, "warning")
         end
     end
 
-    local function row(offset, list)
-        local holder = New("Frame", {
-            Parent = container,
-            Position = UDim2.new(0, 3, 1, offset),
-            Size = UDim2.new(1, -6, 0, 24),
-            BackgroundTransparency = 1,
-        })
-        for index, properties in list do
-            local slotPosition, slotSize = ButtonSlot(index, #list, 6)
-            CreateButton(holder, properties, slotPosition, slotSize, "panel_text")
+    -- Marks the selected config to be loaded by Library:LoadAutoload(); doing it
+    -- again clears the mark.
+    function configs:Autoload()
+        local name = self.Selected
+        if not name then
+            return
         end
+        if not Files.Supported then
+            notify("this executor has no filesystem", "warning")
+            return
+        end
+        Library:SetAutoload(Library:GetAutoload() ~= name and name or nil)
+        self:Reload()
     end
 
-    row(-87, {
-        { Name = "Load", Callback = function() configs:Load() end },
-        { Name = "Save", Callback = function() configs:Save() end },
+    section:DoubleButton({
+        Name = "load",
+        Callback = function()
+            configs:Load()
+        end,
+    }, {
+        Name = "save",
+        Callback = function()
+            configs:Save()
+        end,
     })
-    row(-57, {
-        { Name = "Delete", Callback = function() configs:Delete() end },
-        { Name = "Rewrite", Callback = function() configs:Rewrite() end },
+    section:DoubleButton({
+        Name = "delete",
+        Callback = function()
+            configs:Delete()
+        end,
+    }, {
+        Name = "rewrite",
+        Callback = function()
+            configs:Rewrite()
+        end,
     })
-    row(-27, {
-        { Name = "Refresh", Callback = function() configs:Reload() end },
+    section:DoubleButton({
+        Name = "refresh",
+        Callback = function()
+            configs:Reload()
+        end,
+    }, {
+        Name = "autoload",
+        Callback = function()
+            configs:Autoload()
+        end,
     })
 
-    SetupPanel(configs, cfg)
     configs:Reload()
     self.Components.Configs = configs
     return configs
@@ -4838,6 +6545,10 @@ local function CreateScriptApi(name)
 
     function api.notify(parts, duration)
         return Library:Notify(parts, duration)
+    end
+
+    function api.notification(options)
+        return Library:Notification(options)
     end
 
     function api.window()
@@ -4916,14 +6627,14 @@ function Library:RunScript(source, name)
         end, api)
         if not ok then
             warn(string.format("[%s] %s: %s", Library.Name, name, message))
-            Library:Notify({ { "lua error: ", rgb(220, 80, 80) }, message }, 6)
+            Library:Notification({ Title = "lua error", Text = message, Type = "error", Duration = 6 })
         end
     end)
     return true
 end
 
+-- The script editor, built from the menu's own window and section.
 function Library:Lua(properties)
-    self:Load()
     local cfg = Options(properties, {
         name = "lua",
         size = Vector2.new(449, 283),
@@ -4932,17 +6643,16 @@ function Library:Lua(properties)
         file = "main", -- saved as <Folder>/scripts/<file>.lua
     })
     cfg.id = "lua"
+    cfg.tabs, cfg.columns = false, 1
 
-    local frame, container = PanelWindow("Lua", cfg, { { "outline" } }, { { "panel_inline" } }, "page", 27, 6, 4)
-    local lua = setmetatable({ Frame = frame, File = cfg.file }, Panel)
+    local lua = self:Window(cfg)
+    lua.File = cfg.file
+    local section = lua:Section({ Name = "editor" })
 
-    local _, editor = Utility.Box({
-        Parent = container,
-        Position = fromOffset(3, 2),
-        Size = UDim2.new(1, -6, 1, -30),
-    }, { { "border" }, { "button_outline" } }, "white")
-    Utility.Gradient(editor, { "editor_top", "list_bottom" })
-    New("Frame", { Parent = editor, Size = UDim2.new(0, 15, 1, 0), BackgroundColor3 = "gutter" })
+    local row = section:Row(60)
+    section:Stretch(row, 60)
+    local _, editor = Utility.Box({ Parent = row, Size = UDim2.fromScale(1, 1) }, { { "border" } }, "element")
+    New("Frame", { Parent = editor, Size = UDim2.new(0, 17, 1, 0), BackgroundColor3 = "gutter" })
 
     local scroll = New("ScrollingFrame", {
         Parent = editor,
@@ -4953,25 +6663,26 @@ function Library:Lua(properties)
     })
     local highlight = New("Frame", {
         Parent = scroll,
-        Position = fromOffset(15, 0),
-        Size = UDim2.new(1, -15, 0, 14),
+        Position = fromOffset(17, 0),
+        Size = UDim2.new(1, -17, 0, 10),
         BackgroundColor3 = "editor_line",
     })
-    local numbers = Utility.Text("panel_text", {
+    local numbers = Utility.Text("text", {
         Parent = scroll,
-        Position = fromOffset(2, 0),
-        Size = fromOffset(13, 0),
+        Position = fromOffset(0, 1),
+        Size = fromOffset(15, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         RichText = true,
-        TextXAlignment = Left,
+        TextColor3 = "text_dim",
+        TextXAlignment = Right,
         TextYAlignment = Enum.TextYAlignment.Top,
         ZIndex = 2,
     })
-    local input = Utility.Text("panel_text", {
+    local input = Utility.Text("text", {
         Class = "TextBox",
         Parent = scroll,
-        Position = fromOffset(16, 0),
-        Size = UDim2.new(1, -20, 0, 16), -- grows with the script; long lines scroll sideways
+        Position = fromOffset(20, 1),
+        Size = UDim2.new(1, -24, 0, 12), -- grows with the script; long lines scroll sideways
         AutomaticSize = Enum.AutomaticSize.XY,
         MultiLine = true,
         TextWrapped = false,
@@ -4980,7 +6691,6 @@ function Library:Lua(properties)
         PlaceholderText = cfg.placeholder,
         PlaceholderColor3 = "placeholder",
         ZIndex = 2,
-        Stroke = false,
     })
     lua.Input = input
 
@@ -4988,19 +6698,18 @@ function Library:Lua(properties)
 
     local function refresh()
         local _, breaks = string.gsub(input.Text, "\n", "")
-        local size = (Library.Text.panel_text or Library.Text.text).Size
-        local pitch = size + 1
+        local pitch = Library.Text.text.Size + 1
         -- always number every visible row, like an editor
         local rows = math.max(breaks + 1, math.floor(editor.AbsoluteSize.Y / Library.Scale / pitch))
 
         local cursor = input.CursorPosition
         if cursor and cursor > 0 then
-            local _, before = string.gsub(string.sub(input.Text, 1, cursor - 1), "\n", "")
-            line = before + 1
+            local _, earlier = string.gsub(string.sub(input.Text, 1, cursor - 1), "\n", "")
+            line = earlier + 1
         end
         line = math.clamp(line, 1, breaks + 1)
 
-        local accent = Utility.RichColor(Library:GetColor("accent_soft"))
+        local accent = Utility.RichColor(Library:GetColor("accent_text"))
         local out = table.create(rows)
         for index = 1, rows do
             out[index] = index == line and string.format('<font color="%s">%d</font>', accent, index) or tostring(index)
@@ -5011,12 +6720,13 @@ function Library:Lua(properties)
         if bounds > 0 then
             pitch = bounds / rows
         end
-        highlight.Position = fromOffset(15, math.floor((line - 1) * pitch + 0.5))
-        highlight.Size = UDim2.new(1, -15, 0, math.max(1, math.floor(pitch + 0.5) - 2))
+        highlight.Position = fromOffset(17, math.floor((line - 1) * pitch + 0.5) + 1)
+        highlight.Size = UDim2.new(1, -17, 0, math.max(1, math.floor(pitch + 0.5)))
     end
 
     Utility.Connect(input:GetPropertyChangedSignal("Text"), refresh)
     Utility.Connect(input:GetPropertyChangedSignal("CursorPosition"), refresh)
+    Utility.Connect(editor:GetPropertyChangedSignal("AbsoluteSize"), refresh)
     Library.ThemeChanged:Connect(refresh)
 
     function lua:GetText()
@@ -5031,7 +6741,7 @@ function Library:Lua(properties)
         local ok, message = Library:RunScript(input.Text, self.File)
         if not ok then
             warn(string.format("[%s] %s", Library.Name, message))
-            Library:Notify({ { "lua error: ", rgb(220, 80, 80) }, message }, 6)
+            Library:Notification({ Title = "lua error", Text = message, Type = "error", Duration = 6 })
         end
         return ok, message
     end
@@ -5043,7 +6753,11 @@ function Library:Lua(properties)
     function lua:Save(name)
         Files.MakeFolder(Library.Folder .. "/scripts")
         local saved = Files.Write(path(name), input.Text)
-        Library:Notify(saved and { "saved script ", { name or self.File } } or "this executor has no filesystem")
+        if saved then
+            Library:Notification({ Title = "lua", Text = { "saved ", { name or self.File } }, Type = "success" })
+        else
+            Library:Notification({ Title = "lua", Text = "this executor has no filesystem", Type = "warning" })
+        end
         return saved
     end
 
@@ -5057,21 +6771,23 @@ function Library:Lua(properties)
         return false
     end
 
-    local buttons = New("Frame", {
-        Parent = container,
-        Position = UDim2.new(0, 3, 1, -25),
-        Size = UDim2.new(1, -6, 0, 20),
-        BackgroundTransparency = 1,
+    section:TripleButton({
+        Name = "execute",
+        Callback = function()
+            lua:Execute()
+        end,
+    }, {
+        Name = "save",
+        Callback = function()
+            lua:Save()
+        end,
+    }, {
+        Name = "clear",
+        Callback = function()
+            lua:SetText("")
+        end,
     })
-    for index, properties in {
-        { Name = "Execute", Callback = function() lua:Execute() end },
-        { Name = "Save", Callback = function() lua:Save() end },
-    } do
-        local slotPosition, slotSize = ButtonSlot(index, 2, 5)
-        CreateButton(buttons, properties, slotPosition, slotSize, "panel_text")
-    end
 
-    SetupPanel(lua, cfg)
     lua:Load()
     refresh()
     if cfg.autoexecute and input.Text ~= "" then
@@ -5331,6 +7047,137 @@ function Library:ThemeWindow(properties)
         end
     end
 
+    -- motion: how the interface animates, and the notification stack
+    local settings = self.Animations
+    local motion = window:Tab({ Name = "motion" })
+
+    local animations = motion:Section({ Name = "animations", Side = "left" })
+    animations:Toggle({
+        Name = "enabled",
+        Default = settings.Enabled,
+        Flag = "ui_anim_enabled",
+        Callback = function(enabled)
+            Library:SetAnimation("Enabled", enabled)
+        end,
+    })
+    animations:Slider({
+        Name = "speed",
+        Min = 0.25,
+        Max = 3,
+        Step = 0.25,
+        Default = settings.Speed,
+        Suffix = "x",
+        Flag = "ui_anim_speed",
+        Callback = function(speed)
+            Library:SetAnimation("Speed", speed)
+        end,
+    })
+    animations:Dropdown({
+        Name = "easing",
+        Options = {
+            "linear", "sine", "quad", "cubic", "quart", "quint", "exponential", "circular", "back", "bounce", "elastic",
+        },
+        Default = string.lower(settings.Style),
+        Flag = "ui_anim_style",
+        Callback = function(style)
+            Library:SetAnimation("Style", style)
+        end,
+    })
+    animations:Dropdown({
+        Name = "direction",
+        Options = { "in", "out", "inout" },
+        Default = string.lower(settings.Direction),
+        Flag = "ui_anim_direction",
+        Callback = function(direction)
+            Library:SetAnimation("Direction", direction)
+        end,
+    })
+    animations:Dropdown({
+        Name = "windows",
+        Options = { "none", "fade", "slide", "scale" },
+        Default = string.lower(settings.Windows),
+        Flag = "ui_anim_windows",
+        Callback = function(kind)
+            Library:SetAnimation("Windows", kind)
+        end,
+    })
+    for _, kind in { "Tabs", "Elements", "Popups", "Notifications" } do
+        animations:Toggle({
+            Name = string.lower(kind),
+            Default = settings[kind],
+            Flag = "ui_anim_" .. string.lower(kind),
+            Callback = function(enabled)
+                Library:SetAnimation(kind, enabled)
+            end,
+        })
+    end
+
+    local gradients = motion:Section({ Name = "gradients", Side = "right", Height = "auto" })
+    gradients:Toggle({
+        Name = "animated",
+        Default = settings.Gradients,
+        Flag = "ui_gradient_animated",
+        Callback = function(enabled)
+            Library:SetAnimation("Gradients", enabled)
+        end,
+    })
+    gradients:Slider({
+        Name = "speed",
+        Min = 0.25,
+        Max = 3,
+        Step = 0.25,
+        Default = settings.GradientSpeed,
+        Suffix = "x",
+        Flag = "ui_gradient_speed",
+        Callback = function(speed)
+            Library:SetAnimation("GradientSpeed", speed)
+        end,
+    })
+
+    if components.Notifications then
+        local stack = components.Notifications
+        local section = motion:Section({ Name = "notifications", Side = "right" })
+        section:Dropdown({
+            Name = "position",
+            Options = { "top left", "top center", "top right", "bottom left", "bottom center", "bottom right" },
+            Default = string.lower((string.gsub(stack.Position, "(%l)(%u)", "%1 %2"))),
+            Flag = "ui_notify_position",
+            Callback = function(position)
+                stack:SetPosition(position)
+            end,
+        })
+        section:Dropdown({
+            Name = "animation",
+            Options = { "slide", "bounce", "back", "fade" },
+            Default = string.lower(stack.Animation),
+            Flag = "ui_notify_animation",
+            Callback = function(animation)
+                stack.Animation = LogAnimations[animation] or "Slide"
+            end,
+        })
+        section:Slider({
+            Name = "duration",
+            Min = 1,
+            Max = 10,
+            Step = 0.5,
+            Default = stack.Duration,
+            Suffix = "s",
+            Flag = "ui_notify_duration",
+            Callback = function(duration)
+                stack.Duration = duration
+            end,
+        })
+        section:Button({
+            Name = "test",
+            Callback = function()
+                Library:Notification({
+                    Title = "notification",
+                    Text = { "this is what a ", { "notification" }, " looks like" },
+                })
+            end,
+        })
+    end
+
     components.Theme = window
     return window
 end
@@ -5397,6 +7244,8 @@ function Library:Unload()
     end
     table.clear(self.Keybinds)
     table.clear(self.Panels)
+    table.clear(AnimatedPickers)
+    table.clear(Animating)
 end
 
 return Library
