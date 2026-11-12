@@ -49,11 +49,11 @@ AimAssist:Button({
     end,
 })
 
-local Triggerbot = Aimbot:Section({ Name = "triggerbot", Side = "right", Height = "auto" })
+local Triggerbot = Aimbot:Section({ Name = "triggerbot", Side = "right" })
 Triggerbot:Toggle({ Name = "toggle", Flag = "trigger_enabled", Default = true })
 
 -- click a part of the character to pick it, drag to turn the character
-local AimPart = Aimbot:Section({ Name = "aim part", Side = "right" })
+local AimPart = Aimbot:Section({ Name = "aim part", Side = "right", Height = 200 })
 AimPart:PartPicker({ Flag = "aim_part", Default = "Head", Fill = true })
 
 -- rage: the rest of the element set
@@ -71,7 +71,12 @@ Elements:Textbox({ Name = "text", Flag = "demo_text", Placeholder = "type here" 
 Elements:Label({ Name = "menu bind" }):Keybind({ Name = "example bind", Flag = "demo_bind", Default = Enum.KeyCode.X })
 Elements:Colorpicker({ Name = "colour", Flag = "demo_color", Default = Color3.fromRGB(255, 80, 80), Transparency = 0.25 })
 -- a colour can animate: also "Pulse" and "Fade", or pick one in the colour popup
-Elements:Colorpicker({ Name = "rainbow", Flag = "demo_rainbow", Default = Color3.fromRGB(255, 80, 80), Animation = "Rainbow" })
+Elements:Colorpicker({
+    Name = "rainbow",
+    Flag = "demo_rainbow",
+    Default = Color3.fromRGB(255, 80, 80),
+    Animation = "Rainbow",
+})
 Elements:Divider("buttons")
 Elements:Button({ Name = "button" })
 Elements:DoubleButton({ Name = "button" }, { Name = "button" })
@@ -87,7 +92,7 @@ Lists:List({
 })
 
 -- several parts at once, three at most, picked as groups that fit R6 and R15 alike
-local Hitboxes = Rage:Section({ Name = "hitboxes", Side = "right" })
+local Hitboxes = Rage:Section({ Name = "hitboxes", Side = "right", Height = 200 })
 Hitboxes:PartPicker({
     Flag = "demo_parts",
     Multi = true,

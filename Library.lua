@@ -1557,36 +1557,47 @@ local function Transition(panel, visible)
     local items = Utility.Fades(frame)
     local size = frame.AbsoluteSize / Library.Scale
     local scale = kind == "Scale" and (frame:FindFirstChildOfClass("UIScale") or New("UIScale", { Parent = frame }))
-    local moved = Vector2.zero
 
-    -- shown: 0 hidden -> 1 in place. The frame is nudged relative to where it
-    -- is, so a drag or a loaded position during the animation is kept.
+    local function offsets()
+        local position = frame.Position
+        return Vector2.new(position.X.Offset, position.Y.Offset)
+    end
+    local base = offsets() -- where the frame belongs
+    local written = base -- what this animation last put there
+
+    -- shown: 0 hidden -> 1 in place
     local function apply(shown)
         Utility.Fade(items, shown)
-        local offset = Vector2.zero
+        local nudge = Vector2.zero
         if kind == "Slide" then
-            offset = Vector2.new(0, math.floor((1 - shown) * 12 + 0.5))
+            nudge = Vector2.new(0, math.floor((1 - shown) * 12 + 0.5))
         elseif scale then
             local factor = 0.94 + 0.06 * shown
             scale.Scale = factor
-            offset = Vector2.new(
+            nudge = Vector2.new(
                 math.floor(size.X * (1 - factor) / 2 + 0.5),
                 math.floor(size.Y * (1 - factor) / 2 + 0.5)
             )
         end
-        if offset ~= moved then
-            local current = frame.Position
-            frame.Position = UDim2.new(
-                current.X.Scale,
-                current.X.Offset + offset.X - moved.X,
-                current.Y.Scale,
-                current.Y.Offset + offset.Y - moved.Y
-            )
-            moved = offset
+        local now = offsets()
+        if now ~= written then
+            base = now -- a drag or a loaded position moved the frame: that is its place now
+        end
+        written = base + nudge
+        if written ~= now then
+            local position = frame.Position
+            frame.Position = UDim2.new(position.X.Scale, written.X, position.Y.Scale, written.Y)
         end
     end
 
     local transition, animation = {}, nil
+
+    -- Where the frame belongs, without the animation's own nudge.
+    function transition:Position()
+        local now = offsets()
+        return now ~= written and now or base
+    end
+
     function transition:Stop()
         panel.Transition = nil
         animation:Disconnect()
@@ -1663,6 +1674,9 @@ function Panel:SetPosition(position)
 end
 
 function Panel:GetPosition()
+    if self.Transition then
+        return self.Transition:Position() -- an open / close animation nudges the frame itself
+    end
     local position = self.Frame.Position
     return Vector2.new(position.X.Offset, position.Y.Offset)
 end
@@ -1826,18 +1840,26 @@ function Library:Window(properties)
     window.Page = page
 
     if cfg.resizable ~= false then
-        -- a corner mark in the gap between the page and the window border
+        -- a corner mark in the gap between the page and the window border; the
+        -- area that takes the drag is larger on touch screens
+        local reach = UserInputService.TouchEnabled and 18 or 12
         local grip = New("TextButton", {
             Parent = outline,
             AnchorPoint = Vector2.new(1, 1),
             Position = UDim2.fromScale(1, 1),
-            Size = fromOffset(12, 12),
+            Size = fromOffset(reach, reach),
             ZIndex = 4,
         })
-        local marks = {
-            New("Frame", { Parent = grip, Position = fromOffset(2, 8), Size = fromOffset(7, 1), BackgroundColor3 = "text_dim" }),
-            New("Frame", { Parent = grip, Position = fromOffset(8, 2), Size = fromOffset(1, 7), BackgroundColor3 = "text_dim" }),
-        }
+        local marks = {}
+        for index, size in { fromOffset(7, 1), fromOffset(1, 7) } do
+            marks[index] = New("Frame", {
+                Parent = grip,
+                AnchorPoint = Vector2.new(1, 1),
+                Position = UDim2.new(1, -3, 1, -3),
+                Size = size,
+                BackgroundColor3 = "text_dim",
+            })
+        end
         Utility.Resize(grip, outline, window.MinSize, function(resized)
             window:SetSize(resized)
         end, function(active)
@@ -2653,11 +2675,6 @@ function ColorPopup:Build()
         end
         local index = table.find(ColorAnimationOrder, picker.Animation) or 1
         picker:SetAnimation(ColorAnimationOrder[(index - 1 + direction) % #ColorAnimationOrder + 1])
-        if picker.Animation ~= "Fade" then
-            self.Target = "Base"
-        end
-        self:Arrange()
-        self:Sync()
     end
     Utility.Connect(self.ModeRow.MouseButton1Click, function()
         cycle(1)
@@ -2731,6 +2748,9 @@ function ColorPopup:Arrange()
     local picker = self.Current
     if not picker then
         return
+    end
+    if picker.Animation ~= "Fade" then
+        self.Target = "Base" -- only "Fade" has a second colour to edit
     end
     local y = 148
     local function place(row, shown, height)
@@ -2911,6 +2931,10 @@ local function CreateColorpicker(holder, properties, name, order, window)
         end
         AnimatedPickers[self] = self.Animation ~= "Static" or nil
         self:Step(os.clock())
+        if ColorPopup.Current == self then
+            ColorPopup:Arrange() -- the popup's rows depend on the animation
+            ColorPopup:Sync()
+        end
     end
 
     function picker:Get()
@@ -5312,7 +5336,12 @@ function Library:Notifications(properties)
         })
         New("UIStroke", { Parent = body, Color = "inline" }) -- the window's inline, inside the outline
         New("UIListLayout", { Parent = body })
-        local line = New("Frame", { Parent = body, Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = "accent", LayoutOrder = 1 })
+        local line = New("Frame", {
+            Parent = body,
+            Size = UDim2.new(1, 0, 0, 1),
+            BackgroundColor3 = "accent",
+            LayoutOrder = 1,
+        })
         local content = New("Frame", {
             Parent = body,
             Size = UDim2.new(1, 0, 0, 0),
@@ -5367,7 +5396,12 @@ function Library:Notifications(properties)
             end
         end
 
-        local track = New("Frame", { Parent = body, Size = UDim2.new(1, 0, 0, 2), BackgroundColor3 = "track", LayoutOrder = 3 })
+        local track = New("Frame", {
+            Parent = body,
+            Size = UDim2.new(1, 0, 0, 2),
+            BackgroundColor3 = "track",
+            LayoutOrder = 3,
+        })
         local bar = New("Frame", { Parent = track, Size = UDim2.fromScale(1, 1), BackgroundColor3 = "accent" })
 
         local function write(target, value)
@@ -5446,7 +5480,7 @@ function Library:Notifications(properties)
                 holder.Size = UDim2.new(1, 0, 0, height)
                 local tween = Utility.Motion("Notifications", holder, { Size = UDim2.new(1, 0, 0, 0) }, 0.12)
                 if tween then
-                    tween.Completed:Connect(function()
+                    tween.Completed:Once(function()
                         Utility.Destroy(holder)
                     end)
                 else
@@ -6215,7 +6249,11 @@ function Library:EspPreview(properties)
                     used += 1
                     local bone = lines[used]
                     if not bone then
-                        bone = New("Frame", { Parent = overlay, AnchorPoint = Vector2.new(0.5, 0.5), BackgroundColor3 = WHITE })
+                        bone = New("Frame", {
+                            Parent = overlay,
+                            AnchorPoint = Vector2.new(0.5, 0.5),
+                            BackgroundColor3 = WHITE,
+                        })
                         lines[used] = bone
                     end
                     local delta = (to - from) * area
