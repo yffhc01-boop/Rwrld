@@ -3,7 +3,7 @@
     Run it in your executor; RightShift opens and closes the menu.
 ]]
 
-local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/kvartirant327-sys/Lol/HEAD/Library.lua"))()
+local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/yffhc01-boop/Rwrld/HEAD/Library.lua"))()
 
 -- Everything is saved under this workspace folder (fonts, configs, scripts).
 Library.Name = "rainworld"
@@ -19,7 +19,7 @@ local Esp = Window:Tab("esp")
 local Visuals = Window:Tab("visuals")
 local Misc = Window:Tab("misc")
 
--- aimbot: the two sections from the design
+-- aimbot: the two sections from the design, and a part picker
 local AimAssist = Aimbot:Section({ Name = "aim assist", Side = "left" })
 
 local Enabled = AimAssist:Toggle({
@@ -52,6 +52,10 @@ AimAssist:Button({
 local Triggerbot = Aimbot:Section({ Name = "triggerbot", Side = "right" })
 Triggerbot:Toggle({ Name = "toggle", Flag = "trigger_enabled", Default = true })
 
+-- click a part of the character to pick it, drag to turn the character
+local AimPart = Aimbot:Section({ Name = "aim part", Side = "right", Height = 200 })
+AimPart:PartPicker({ Flag = "aim_part", Default = "Head", Fill = true })
+
 -- rage: the rest of the element set
 local Elements = Rage:Section({ Name = "elements", Side = "left" })
 Elements:Slider({ Name = "range", Flag = "demo_range", Min = 0, Max = 100, Default = { 9, 71 }, Range = true })
@@ -66,6 +70,13 @@ Elements:Dropdown({
 Elements:Textbox({ Name = "text", Flag = "demo_text", Placeholder = "type here" })
 Elements:Label({ Name = "menu bind" }):Keybind({ Name = "example bind", Flag = "demo_bind", Default = Enum.KeyCode.X })
 Elements:Colorpicker({ Name = "colour", Flag = "demo_color", Default = Color3.fromRGB(255, 80, 80), Transparency = 0.25 })
+-- a colour can animate: also "Pulse" and "Fade", or pick one in the colour popup
+Elements:Colorpicker({
+    Name = "rainbow",
+    Flag = "demo_rainbow",
+    Default = Color3.fromRGB(255, 80, 80),
+    Animation = "Rainbow",
+})
 Elements:Divider("buttons")
 Elements:Button({ Name = "button" })
 Elements:DoubleButton({ Name = "button" }, { Name = "button" })
@@ -80,11 +91,27 @@ Lists:List({
     Save = false,
 })
 
+-- several parts at once, three at most, picked as groups that fit R6 and R15 alike
+local Hitboxes = Rage:Section({ Name = "hitboxes", Side = "right", Height = 200 })
+Hitboxes:PartPicker({
+    Flag = "demo_parts",
+    Multi = true,
+    Max = 3,
+    Groups = Library.PartGroups,
+    Default = { "head", "chest" },
+    Fill = true,
+})
+
 -- esp / visuals: plain toggles with colours, as a script would use them
+local EspElements = { "box", "name", "health bar", "distance", "weapon", "skeleton" }
 local Players = Esp:Section({ Name = "players", Side = "left" })
-for _, name in { "box", "name", "health bar", "distance", "weapon", "skeleton" } do
-    local toggle = Players:Toggle({ Name = name, Flag = "esp_" .. string.gsub(name, " ", "_") })
-    toggle:Colorpicker({ Flag = "esp_" .. string.gsub(name, " ", "_") .. "_color", Default = Color3.fromRGB(255, 255, 255) })
+for _, name in EspElements do
+    local flag = "esp_" .. string.gsub(name, " ", "_")
+    local toggle = Players:Toggle({ Name = name, Flag = flag })
+    toggle:Colorpicker({
+        Flag = flag .. "_color",
+        Default = name == "health bar" and Color3.fromRGB(120, 220, 110) or Color3.fromRGB(255, 255, 255),
+    })
 end
 
 local World = Visuals:Section({ Name = "world", Side = "left" })
@@ -104,12 +131,19 @@ local Watermark = Library:Watermark({
 
 local Keybinds = Library:KeybindList({ Name = "keybinds", Mode = "All" })
 local Hitlogs = Library:Hitlogs({ Side = "Left", Animation = "Slide" })
+local Notifications = Library:Notifications({ Position = "TopRight" })
 local Target = Library:TargetHud({ Mode = "Static" })
-local Preview = Library:EspPreview({ Name = "esp preview", Text = "no preview for ya today" })
+local Preview = Library:EspPreview({ Name = "esp preview" })
 local Configs = Library:Configs()
 local Lua = Library:Lua()
 local Dock = Library:Dock({ Name = "rainworld.club", Mode = "Top" })
 local Theme = Library:ThemeWindow() -- create last: it lists settings for the pieces above
+
+-- the preview draws each esp element the way its toggle and colour picker say
+for _, name in EspElements do
+    local flag = "esp_" .. string.gsub(name, " ", "_")
+    Preview:Bind(name, flag, flag .. "_color")
+end
 
 Dock:Add("menu", Window)
 Dock:Add("watermark", Watermark)
@@ -119,6 +153,7 @@ Dock:Add("lua", Lua)
 Dock:Add("theme", Theme)
 Dock:Add("keybinds", Keybinds)
 Dock:Add("hitlogs", Hitlogs)
+Dock:Add("notifications", Notifications)
 Dock:Add("target", Target)
 
 --// Wiring ----------------------------------------------------------------------
@@ -128,6 +163,30 @@ Settings:Button({
     Name = "test hitlog",
     Callback = function()
         Hitlogs:Add({ "hit ", { "cursedbullet" }, " in the ", { "head" }, " for ", { "100", Color3.fromRGB(120, 220, 110) } })
+    end,
+})
+Settings:DoubleButton({
+    Name = "notification",
+    Callback = function()
+        Library:Notification({
+            Title = "update ready",
+            Text = { "version ", { Library.Version }, " adds notifications, resizing and animated colours" },
+            Duration = 8,
+            Buttons = {
+                {
+                    Name = "nice",
+                    Callback = function()
+                        print("nice")
+                    end,
+                },
+                { Name = "dismiss" },
+            },
+        })
+    end,
+}, {
+    Name = "warning",
+    Callback = function()
+        Library:Notification({ Title = "careful", Text = "something needs your attention", Type = "warning" })
     end,
 })
 Settings:DoubleButton({
@@ -152,9 +211,16 @@ Settings:Button({
 Library:OnChanged("aim_speed", function(value)
     print("speed is now", value)
 end)
+Library:OnChanged("aim_part", function(part)
+    print("aiming at", part)
+end)
 AimKey.Changed:Connect(function(active)
     print("aim key", active and "held" or "released")
 end)
 
 Library:LoadAutoload()
-Library:Notify({ "loaded ", { Library.Name }, " - press ", { "right shift" }, " to toggle the menu" })
+Library:Notification({
+    Title = Library.Name,
+    Text = { "loaded - press ", { "right shift" }, " to toggle the menu" },
+    Type = "success",
+})
